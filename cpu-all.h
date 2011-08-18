@@ -500,6 +500,7 @@ typedef struct RAMBlock {
 
 typedef struct RAMList {
     uint8_t *phys_dirty;
+    uint32_t version;
     QLIST_HEAD(, RAMBlock) blocks_mru;
     QLIST_HEAD(, RAMBlock) blocks;
 } RAMList;
