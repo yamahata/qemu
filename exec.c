@@ -645,7 +645,6 @@ bool tcg_enabled(void)
 void cpu_exec_init_all(void)
 {
 #if !defined(CONFIG_USER_ONLY)
-    qemu_mutex_init(&ram_list.mutex);
     memory_map_init();
     io_mem_init();
 #endif
@@ -2570,6 +2569,8 @@ ram_addr_t qemu_ram_alloc_from_ptr(ram_addr_t size, void *host,
     QLIST_INSERT_HEAD(&ram_list.blocks, new_block, next);
     QLIST_INSERT_HEAD(&ram_list.blocks_mru, new_block, next_mru);
 
+    ram_list.version++;
+
     ram_list.phys_dirty = g_realloc(ram_list.phys_dirty,
                                        last_ram_offset() >> TARGET_PAGE_BITS);
     memset(ram_list.phys_dirty + (new_block->offset >> TARGET_PAGE_BITS),
@@ -2598,6 +2599,7 @@ void qemu_ram_free_from_ptr(ram_addr_t addr)
         if (addr == block->offset) {
             QLIST_REMOVE(block, next);
             QLIST_REMOVE(block, next_mru);
+            ram_list.version++;
             g_free(block);
             return;
         }
@@ -2612,6 +2614,7 @@ void qemu_ram_free(ram_addr_t addr)
         if (addr == block->offset) {
             QLIST_REMOVE(block, next);
             QLIST_REMOVE(block, next_mru);
+            ram_list.version++;
             if (block->flags & RAM_PREALLOC_MASK) {
                 ;
             } else if (mem_path) {
