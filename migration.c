@@ -65,6 +65,10 @@ int qemu_start_incoming_migration(const char *uri)
     const char *p;
     int ret;
 
+    if (incoming_postcopy) {
+        postcopy_incoming_prepare();
+    }
+
     if (strstart(uri, "tcp:", &p))
         ret = tcp_start_incoming_migration(p);
 #if !defined(WIN32)

@@ -116,6 +116,12 @@ int fd_start_incoming_migration(const char *infd)
     DPRINTF("Attempting to start an incoming migration via fd\n");
 
     fd = strtol(infd, NULL, 0);
+    if (incoming_postcopy) {
+        int flags = fcntl(fd, F_GETFL);
+        if ((flags & O_ACCMODE) != O_RDWR) {
+            return -EINVAL;
+        }
+    }
     f = qemu_fdopen(fd, "rb");
     if(f == NULL) {
         DPRINTF("Unable to apply qemu wrapper to file descriptor\n");

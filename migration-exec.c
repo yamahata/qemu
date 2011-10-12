@@ -106,6 +106,10 @@ int exec_start_incoming_migration(const char *command)
 {
     QEMUFile *f;
 
+    if (incoming_postcopy) {
+        return -ENOSYS;
+    }
+
     DPRINTF("Attempting to start an incoming migration\n");
     f = qemu_popen_cmd(command, "r");
     if(f == NULL) {

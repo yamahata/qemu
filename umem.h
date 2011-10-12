@@ -49,6 +49,7 @@ void umem_destroy(UMem *umem);
 /* umem device operations */
 void umem_get_page_request(UMem *umem, struct umem_pages *page_request);
 void umem_mark_page_cached(UMem *umem, struct umem_pages *page_cached);
+void umem_make_page_present(UMem *umem, struct umem_pages *page_present);
 void umem_unmap(UMem *umem);
 void umem_close(UMem *umem);
 

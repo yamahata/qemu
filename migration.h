@@ -83,6 +83,7 @@ uint64_t ram_bytes_remaining(void);
 uint64_t ram_bytes_transferred(void);
 uint64_t ram_bytes_total(void);
 
+void ram_save_set_params(const MigrationParams *params, void *opaque);
 void sort_ram_list(void);
 int ram_save_block(QEMUFile *f);
 void ram_save_memory_set_dirty(void);
@@ -104,7 +105,19 @@ void migrate_add_blocker(Error *reason);
  */
 void migrate_del_blocker(Error *reason);
 
+/* For incoming postcopy */
 extern bool incoming_postcopy;
 extern unsigned long incoming_postcopy_flags;
+
+void postcopy_incoming_ram_free(UMem *umem);
+void postcopy_incoming_prepare(void);
+
+int postcopy_incoming_ram_load(QEMUFile *f, void *opaque, int version_id);
+void postcopy_incoming_fork_umemd(QEMUFile *mig_read);
+void postcopy_incoming_qemu_ready(void);
+void postcopy_incoming_qemu_cleanup(void);
+#if defined(NEED_CPU_H) && !defined(CONFIG_USER_ONLY)
+void postcopy_incoming_qemu_pages_unmapped(ram_addr_t addr, ram_addr_t size);
+#endif
 
 #endif

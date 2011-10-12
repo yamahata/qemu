@@ -135,6 +135,14 @@ void umem_mark_page_cached(UMem *umem, struct umem_pages *page_cached)
     }
 }
 
+void umem_make_page_present(UMem *umem, struct umem_pages *page_present)
+{
+    if (ioctl(umem->fd, UMEM_MAKE_PAGE_PRESENT, page_present)) {
+        perror("daemon: UMEM_MAKE_PAGE_PRESENT");
+        abort();
+    }
+}
+
 void umem_unmap(UMem *umem)
 {
     munmap(umem->umem, umem->size);
