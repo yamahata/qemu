@@ -102,4 +102,7 @@ void migrate_add_blocker(Error *reason);
  */
 void migrate_del_blocker(Error *reason);
 
+extern bool incoming_postcopy;
+extern unsigned long incoming_postcopy_flags;
+
 #endif

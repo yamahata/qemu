@@ -189,6 +189,8 @@ int mem_prealloc = 0; /* force preallocation of physical target memory */
 int nb_nics;
 NICInfo nd_table[MAX_NICS];
 int autostart;
+bool incoming_postcopy = false; /* When -incoming is specified, postcopy mode */
+unsigned long incoming_postcopy_flags = 0; /* flags for postcopy incoming mode */
 static int rtc_utc = 1;
 static int rtc_date_offset = -1; /* -1 means no change */
 QEMUClock *rtc_clock;
@@ -3116,6 +3118,12 @@ int main(int argc, char **argv, char **envp)
             case QEMU_OPTION_incoming:
                 incoming = optarg;
                 runstate_set(RUN_STATE_INMIGRATE);
+                break;
+            case QEMU_OPTION_postcopy:
+                incoming_postcopy = true;
+                break;
+            case QEMU_OPTION_postcopy_flags:
+                incoming_postcopy_flags = strtoul(optarg, NULL, 0);
                 break;
             case QEMU_OPTION_nodefaults:
                 default_serial = 0;
