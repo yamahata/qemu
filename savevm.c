@@ -1981,6 +1981,10 @@ int qemu_loadvm_state(QEMUFile *f)
     uint8_t section_type;
     unsigned int v;
     int ret;
+    QEMUFile *orig_f = NULL;
+
+    /* postcopy may change this. restore later */
+    LoadStateHandler *old_ram_load = savevm_ram_handlers.load_state;
 
     if (qemu_savevm_state_blocked(NULL)) {
         return -EINVAL;
@@ -2048,6 +2052,7 @@ int qemu_loadvm_state(QEMUFile *f)
             break;
         case QEMU_VM_SECTION_PART:
         case QEMU_VM_SECTION_END:
+            assert(orig_f == NULL);
             section_id = qemu_get_be32(f);
 
             QLIST_FOREACH(le, &loadvm_handlers, entry) {
@@ -2068,6 +2073,23 @@ int qemu_loadvm_state(QEMUFile *f)
                 goto out;
             }
             break;
+        case QEMU_VM_POSTCOPY: {
+            QEMUFile *buf_file = NULL;
+            ret = postcopy_incoming_loadvm_state(f, &buf_file);
+            if (ret) {
+                goto out;
+            }
+            if (buf_file != NULL) {
+                /* VMStateDescription:pre/post_load and
+                 * cpu_sychronize_all_post_init() may fault on guest RAM.
+                 * (MSR_KVM_WALL_CLOCK, MSR_KVM_SYSTEM_TIME)
+                 * postcopy threads needs to be created before the fault.
+                 */
+                orig_f = f;
+                f = buf_file;
+            }
+            break;
+        }
         default:
             fprintf(stderr, "Unknown savevm section type %d\n", section_type);
             ret = -EINVAL;
@@ -2080,6 +2102,11 @@ int qemu_loadvm_state(QEMUFile *f)
     ret = 0;
 
 out:
+    if (orig_f != NULL) {
+        qemu_fclose(f);
+        f = orig_f;
+    }
+    savevm_ram_handlers.load_state = old_ram_load;
     QLIST_FOREACH_SAFE(le, &loadvm_handlers, entry, new_le) {
         QLIST_REMOVE(le, entry);
         g_free(le);
