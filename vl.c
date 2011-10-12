@@ -4437,6 +4437,8 @@ int main(int argc, char **argv, char **envp)
 #ifdef CONFIG_TPM
     tpm_cleanup();
 #endif
+    postcopy_incoming_qemu_cleanup();
+
 
     return 0;
 }
