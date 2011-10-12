@@ -2616,6 +2616,28 @@ STEXI
 Prepare for incoming migration, listen on @var{port}.
 ETEXI
 
+DEF("postcopy", 0, QEMU_OPTION_postcopy,
+    "-postcopy	postcopy incoming migration when -incoming is specified\n",
+    QEMU_ARCH_ALL)
+STEXI
+@item -postcopy
+@findex -postcopy
+start incoming migration in postcopy mode.
+ETEXI
+
+DEF("postcopy-flags", HAS_ARG, QEMU_OPTION_postcopy_flags,
+    "-postcopy-flags unsigned-int(flags)\n"
+    "	                flags for postcopy incoming migration\n"
+    "                   when -incoming and -postcopy are specified.\n"
+    "                   This is for benchmark/debug purpose (default: 0)\n",
+    QEMU_ARCH_ALL)
+STEXI
+@item -postcopy-flags int
+@findex -postcopy-flags
+Specify flags for incoming postcopy migration when -incoming and -postcopy are
+specified. This is for benchamrk/debug purpose. (default: 0)
+ETEXI
+
 DEF("nodefaults", 0, QEMU_OPTION_nodefaults, \
     "-nodefaults     don't create default devices\n", QEMU_ARCH_ALL)
 STEXI
