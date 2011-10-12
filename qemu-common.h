@@ -19,6 +19,7 @@ typedef struct DeviceState DeviceState;
 struct Monitor;
 typedef struct Monitor Monitor;
 typedef struct MigrationParams MigrationParams;
+typedef struct UMem UMem;
 
 /* we put basic includes here to avoid repeating them in device drivers */
 #include <stdlib.h>
