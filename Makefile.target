@@ -123,6 +123,8 @@ obj-y += memory_mapping.o
 obj-y += dump.o
 LIBS+=$(libs_softmmu)
 
+obj-y += migration-postcopy.o umem.o
+
 # xen support
 obj-$(CONFIG_XEN) += xen-all.o xen-mapcache.o
 obj-$(CONFIG_NO_XEN) += xen-stub.o
