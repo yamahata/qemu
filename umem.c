@@ -28,8 +28,8 @@
 #include <linux/uvmem.h>
 #endif
 
-#include "bitops.h"
-#include "sysemu.h"
+#include "qemu/bitops.h"
+#include "sysemu/sysemu.h"
 #include "hw/hw.h"
 #include "umem.h"
 
