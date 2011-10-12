@@ -485,6 +485,9 @@ extern ram_addr_t ram_size;
 /* RAM is pre-allocated and passed into qemu_ram_alloc_from_ptr */
 #define RAM_PREALLOC_MASK   (1 << 0)
 
+/* RAM is allocated via umem for postcopy incoming mode */
+#define RAM_POSTCOPY_UMEM_MASK  (1 << 1)
+
 typedef struct RAMBlock {
     struct MemoryRegion *mr;
     uint8_t *host;

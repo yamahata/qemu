@@ -3789,6 +3789,8 @@ int main(int argc, char **argv, char **envp)
     bdrv_close_all();
     pause_all_vcpus();
     net_cleanup();
+    postcopy_incoming_qemu_cleanup();
+
     res_free();
 
     return 0;
