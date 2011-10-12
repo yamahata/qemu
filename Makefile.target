@@ -4,6 +4,7 @@ GENERATED_HEADERS = config-target.h
 CONFIG_NO_PCI = $(if $(subst n,,$(CONFIG_PCI)),n,y)
 CONFIG_NO_KVM = $(if $(subst n,,$(CONFIG_KVM)),n,y)
 CONFIG_NO_XEN = $(if $(subst n,,$(CONFIG_XEN)),n,y)
+CONFIG_NO_POSTCOPY = $(if $(subst n,,$(CONFIG_POSTCOPY)),n,y)
 
 include ../config-host.mak
 include config-devices.mak
@@ -195,6 +196,10 @@ obj-y += memory.o savevm.o cputlb.o
 LIBS+=-lz
 
 obj-i386-$(CONFIG_KVM) += hyperv.o
+
+obj-$(CONFIG_POSTCOPY) += migration-postcopy.o
+obj-$(CONFIG_NO_POSTCOPY) += migration-postcopy-stub.o
+common-obj-$(CONFIG_POSTCOPY) += umem.o
 
 QEMU_CFLAGS += $(VNC_TLS_CFLAGS)
 QEMU_CFLAGS += $(VNC_SASL_CFLAGS)

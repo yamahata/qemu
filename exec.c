@@ -36,6 +36,7 @@
 #include "arch_init.h"
 #include "memory.h"
 #include "exec-memory.h"
+#include "migration.h"
 #if defined(CONFIG_USER_ONLY)
 #include <qemu.h>
 #if defined(__FreeBSD__) || defined(__FreeBSD_kernel__)
@@ -2632,6 +2633,13 @@ ram_addr_t qemu_ram_alloc_from_ptr(ram_addr_t size, void *host,
         new_block->host = host;
         new_block->flags |= RAM_PREALLOC_MASK;
     } else {
+#ifdef CONFIG_POSTCOPY
+        if (incoming_postcopy) {
+            ram_addr_t page_size = getpagesize();
+            size = (size + page_size - 1) & ~(page_size - 1);
+            mem_path = NULL;
+        }
+#endif
         if (mem_path) {
 #if defined (__linux__) && !defined(TARGET_S390X)
             new_block->host = file_ram_alloc(new_block, size, mem_path);
@@ -2709,7 +2717,13 @@ void qemu_ram_free(ram_addr_t addr)
             QLIST_REMOVE(block, next);
             if (block->flags & RAM_PREALLOC_MASK) {
                 ;
-            } else if (mem_path) {
+            }
+#ifdef CONFIG_POSTCOPY
+            else if (block->flags & RAM_POSTCOPY_UMEM_MASK) {
+                postcopy_incoming_ram_free(block->umem);
+            }
+#endif
+            else if (mem_path) {
 #if defined (__linux__) && !defined(TARGET_S390X)
                 if (block->fd) {
                     munmap(block->host, block->length);
@@ -2755,6 +2769,10 @@ void qemu_ram_remap(ram_addr_t addr, ram_addr_t length)
             } else {
                 flags = MAP_FIXED;
                 munmap(vaddr, length);
+                if (block->flags & RAM_POSTCOPY_UMEM_MASK) {
+                    postcopy_incoming_qemu_pages_unmapped(addr, length);
+                    block->flags &= ~RAM_POSTCOPY_UMEM_MASK;
+                }
                 if (mem_path) {
 #if defined(__linux__) && !defined(TARGET_S390X)
                     if (block->fd) {

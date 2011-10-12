@@ -1938,6 +1938,7 @@ int qemu_loadvm_state(QEMUFile *f)
     uint8_t section_type;
     unsigned int v;
     int ret;
+    QEMUFile *orig_f = NULL;
 
     if (qemu_savevm_state_blocked(NULL)) {
         return -EINVAL;
@@ -1964,6 +1965,16 @@ int qemu_loadvm_state(QEMUFile *f)
         switch (section_type) {
         case QEMU_VM_SECTION_START:
         case QEMU_VM_SECTION_FULL:
+            if (section_type == QEMU_VM_SECTION_START) {
+                assert(orig_f == NULL);
+            } else {
+                if (incoming_postcopy && orig_f == NULL) {
+                    fprintf(stderr, "qemu: warning no postcopy section\n");
+                    ret = -EINVAL;
+                    goto out;
+                }
+            }
+
             /* Read section start */
             section_id = qemu_get_be32(f);
             len = qemu_get_byte(f);
@@ -2005,6 +2016,7 @@ int qemu_loadvm_state(QEMUFile *f)
             break;
         case QEMU_VM_SECTION_PART:
         case QEMU_VM_SECTION_END:
+            assert(orig_f == NULL);
             section_id = qemu_get_be32(f);
 
             QLIST_FOREACH(le, &loadvm_handlers, entry) {
@@ -2025,6 +2037,31 @@ int qemu_loadvm_state(QEMUFile *f)
                 goto out;
             }
             break;
+        case QEMU_VM_POSTCOPY:
+            if (incoming_postcopy) {
+                /* VMStateDescription:pre/post_load and
+                 * cpu_sychronize_all_post_init() may fault on guest RAM.
+                 * (MSR_KVM_WALL_CLOCK, MSR_KVM_SYSTEM_TIME)
+                 * postcopy daemon needs to be forked before the fault.
+                 */
+                uint32_t size = qemu_get_be32(f);
+                uint8_t *buf = g_malloc(size);
+                int read_size = qemu_get_buffer(f, buf, size);
+                if (size != read_size) {
+                    fprintf(stderr,
+                            "qemu: warning: error while postcopy size %d %d\n",
+                            size, read_size);
+                    g_free(buf);
+                    ret = -EINVAL;
+                    goto out;
+                }
+                postcopy_incoming_fork_umemd(f);
+
+                orig_f = f;
+                f = qemu_fopen_buf_read(buf, size);
+                break;
+            }
+            /* fallthrough */
         default:
             fprintf(stderr, "Unknown savevm section type %d\n", section_type);
             ret = -EINVAL;
@@ -2032,11 +2069,17 @@ int qemu_loadvm_state(QEMUFile *f)
         }
     }
 
+    fprintf(stderr, "%s:%d QEMU_VM_EOF\n", __func__, __LINE__);
     cpu_synchronize_all_post_init();
 
     ret = 0;
 
 out:
+    if (orig_f != NULL) {
+        assert(incoming_postcopy);
+        qemu_fclose(f);
+        f = orig_f;
+    }
     QLIST_FOREACH_SAFE(le, &loadvm_handlers, entry, new_le) {
         QLIST_REMOVE(le, entry);
         g_free(le);

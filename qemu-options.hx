@@ -2629,7 +2629,10 @@ DEF("postcopy-flags", HAS_ARG, QEMU_OPTION_postcopy_flags,
     "-postcopy-flags unsigned-int(flags)\n"
     "	                flags for postcopy incoming migration\n"
     "                   when -incoming and -postcopy are specified.\n"
-    "                   This is for benchmark/debug purpose (default: 0)\n",
+    "                   This is for benchmark/debug purpose (default: 0)\n"
+    "                   Currently supprted flags are\n"
+    "                   1: enable fault request from umemd to qemu\n"
+    "                      (default: disabled)\n",
     QEMU_ARCH_ALL)
 STEXI
 @item -postcopy-flags int
