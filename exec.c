@@ -39,6 +39,7 @@
 #include "exec/memory.h"
 #include "sysemu/dma.h"
 #include "exec/address-spaces.h"
+#include "migration/migration.h"
 #if defined(CONFIG_USER_ONLY)
 #include <qemu.h>
 #else /* !CONFIG_USER_ONLY */
@@ -1119,6 +1120,8 @@ ram_addr_t qemu_ram_alloc_from_ptr(ram_addr_t size, void *host,
         new_block->host = host;
         new_block->flags |= RAM_PREALLOC_MASK;
     } else {
+        ram_addr_t page_size = getpagesize();
+        size = (size + page_size - 1) & ~(page_size - 1);
         if (mem_path) {
 #if defined (__linux__) && !defined(TARGET_S390X)
             new_block->host = file_ram_alloc(new_block, size, mem_path);
@@ -1211,6 +1214,9 @@ void qemu_ram_free(ram_addr_t addr)
             ram_list.version++;
             if (block->flags & RAM_PREALLOC_MASK) {
                 ;
+            }
+            else if (block->flags & RAM_POSTCOPY_UMEM_MASK) {
+                postcopy_incoming_ram_free(block);
             } else if (mem_path) {
 #if defined (__linux__) && !defined(TARGET_S390X)
                 if (block->fd) {
