@@ -140,13 +140,15 @@ static void unix_accept_incoming_migration(void *opaque)
     f = qemu_fopen_socket(c);
     if (f == NULL) {
         fprintf(stderr, "could not qemu_fopen socket\n");
-        goto out;
+        close(c);
+        goto out2;
     }
 
     process_incoming_migration(f);
-    qemu_fclose(f);
-out:
-    close(c);
+    if (!incoming_postcopy) {
+        qemu_fclose(f);
+        close(c);
+    }
 out2:
     qemu_set_fd_handler2(s, NULL, NULL, NULL, NULL);
     close(s);

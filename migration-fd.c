@@ -105,7 +105,9 @@ static void fd_accept_incoming_migration(void *opaque)
 
     process_incoming_migration(f);
     qemu_set_fd_handler2(qemu_file_fd(f), NULL, NULL, NULL, NULL);
-    qemu_fclose(f);
+    if (!incoming_postcopy) {
+        qemu_fclose(f);
+    }
 }
 
 int fd_start_incoming_migration(const char *infd)

@@ -134,4 +134,14 @@ int64_t migrate_xbzrle_cache_size(void);
 
 int64_t xbzrle_cache_resize(int64_t new_size);
 
+/* For incoming postcopy */
+extern bool incoming_postcopy;
+
+int postcopy_incoming_loadvm_state(QEMUFile *f, QEMUFile **buf_file);
+int postcopy_incoming_ram_load(QEMUFile *f, void *opaque, int version_id);
+void postcopy_incoming_qemu_cleanup(void);
+#if defined(NEED_CPU_H) && !defined(CONFIG_USER_ONLY)
+void postcopy_incoming_ram_free(RAMBlock *ram_block);
+#endif
+
 #endif
