@@ -194,6 +194,7 @@ zlib="yes"
 guest_agent="yes"
 libiscsi=""
 coroutine=""
+postcopy="yes"
 
 # parse CC options first
 for opt do
@@ -824,6 +825,10 @@ for opt do
   ;;
   --disable-guest-agent) guest_agent="no"
   ;;
+  --enable-postcopy) postcopy="yes"
+  ;;
+  --disable-postcopy) postcopy="no"
+  ;;
   *) echo "ERROR: unknown option $opt"; show_help="yes"
   ;;
   esac
@@ -1110,6 +1115,8 @@ echo "  --disable-guest-agent    disable building of the QEMU Guest Agent"
 echo "  --enable-guest-agent     enable building of the QEMU Guest Agent"
 echo "  --with-coroutine=BACKEND coroutine backend. Supported options:"
 echo "                           gthread, ucontext, sigaltstack, windows"
+echo "  --disable-postcopy       disable postcopy mode for live migration"
+echo "  --enable-postcopy        enable postcopy mode for live migration"
 echo ""
 echo "NOTE: The object files are built at the place where configure is launched"
 exit 1
@@ -3029,6 +3036,7 @@ echo "OpenGL support    $opengl"
 echo "libiscsi support  $libiscsi"
 echo "build guest agent $guest_agent"
 echo "coroutine backend $coroutine_backend"
+echo "postcopy support  $postcopy"
 
 if test "$sdl_too_old" = "yes"; then
 echo "-> Your SDL version is too old - please upgrade to have SDL support"
@@ -3327,6 +3335,10 @@ fi
 
 if test "$libiscsi" = "yes" ; then
   echo "CONFIG_LIBISCSI=y" >> $config_host_mak
+fi
+
+if test "$postcopy" = "yes" ; then
+  echo "CONFIG_POSTCOPY=y" >> $config_host_mak
 fi
 
 # XXX: suppress that
