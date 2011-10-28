@@ -287,6 +287,19 @@ void sort_ram_list(void)
     g_free(blocks);
 }
 
+void ram_save_live_mem_size(QEMUFile *f)
+{
+    RAMBlock *block;
+
+    qemu_put_be64(f, ram_bytes_total() | RAM_SAVE_FLAG_MEM_SIZE);
+
+    QLIST_FOREACH(block, &ram_list.blocks, next) {
+        qemu_put_byte(f, strlen(block->idstr));
+        qemu_put_buffer(f, (uint8_t *)block->idstr, strlen(block->idstr));
+        qemu_put_be64(f, block->length);
+    }
+}
+
 int ram_save_live(QEMUFile *f, int stage, void *opaque)
 {
     ram_addr_t addr;
@@ -321,13 +334,7 @@ int ram_save_live(QEMUFile *f, int stage, void *opaque)
 
         memory_global_dirty_log_start();
 
-        qemu_put_be64(f, ram_bytes_total() | RAM_SAVE_FLAG_MEM_SIZE);
-
-        QLIST_FOREACH(block, &ram_list.blocks, next) {
-            qemu_put_byte(f, strlen(block->idstr));
-            qemu_put_buffer(f, (uint8_t *)block->idstr, strlen(block->idstr));
-            qemu_put_be64(f, block->length);
-        }
+        ram_save_live_mem_size(f);
     }
 
     bytes_transferred_last = bytes_transferred;
