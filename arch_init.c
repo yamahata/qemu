@@ -89,13 +89,6 @@ const uint32_t arch_type = QEMU_ARCH;
 /***********************************************************/
 /* ram save/restore */
 
-#define RAM_SAVE_FLAG_FULL     0x01 /* Obsolete, not used anymore */
-#define RAM_SAVE_FLAG_COMPRESS 0x02
-#define RAM_SAVE_FLAG_MEM_SIZE 0x04
-#define RAM_SAVE_FLAG_PAGE     0x08
-#define RAM_SAVE_FLAG_EOS      0x10
-#define RAM_SAVE_FLAG_CONTINUE 0x20
-
 #ifdef __ALTIVEC__
 #include <altivec.h>
 #define VECTYPE        vector unsigned char
