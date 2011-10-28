@@ -130,7 +130,7 @@ static int is_dup_page(uint8_t *page)
 static RAMBlock *last_block;
 static ram_addr_t last_offset;
 
-static int ram_save_block(QEMUFile *f)
+int ram_save_block(QEMUFile *f)
 {
     RAMBlock *block = last_block;
     ram_addr_t offset = last_offset;
@@ -239,7 +239,7 @@ static int block_compar(const void *a, const void *b)
     return strcmp((*ablock)->idstr, (*bblock)->idstr);
 }
 
-static void sort_ram_list(void)
+void sort_ram_list(void)
 {
     RAMBlock *block, *nblock, **blocks;
     int n;
