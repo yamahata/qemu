@@ -826,23 +826,25 @@ ETEXI
 
     {
         .name       = "migrate",
-        .args_type  = "detach:-d,blk:-b,inc:-i,uri:s",
-        .params     = "[-d] [-b] [-i] uri",
+        .args_type  = "detach:-d,blk:-b,inc:-i,postcopy:-p,uri:s",
+        .params     = "[-d] [-b] [-i] [-p] uri",
         .help       = "migrate to URI (using -d to not wait for completion)"
 		      "\n\t\t\t -b for migration without shared storage with"
 		      " full copy of disk\n\t\t\t -i for migration without "
 		      "shared storage with incremental copy of disk "
-		      "(base image shared between src and destination)",
+		      "(base image shared between src and destination)"
+		      "\n\t\t\t-p for migration with postcopy mode enabled",
         .mhandler.cmd = hmp_migrate,
     },
 
 
 STEXI
-@item migrate [-d] [-b] [-i] @var{uri}
+@item migrate [-d] [-b] [-i] [-p] @var{uri}
 @findex migrate
 Migrate to @var{uri} (using -d to not wait for completion).
 	-b for migration with full copy of disk
 	-i for migration with incremental copy of disk (base image is shared)
+	-p for migration with postcopy mode enabled
 ETEXI
 
     {
