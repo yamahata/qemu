@@ -40,6 +40,7 @@ int xen_available(void);
 #define RAM_SAVE_VERSION_ID     4 /* currently version 4 */
 
 #if defined(NEED_CPU_H) && !defined(CONFIG_USER_ONLY)
+int ram_save_page(QEMUFile *f, RAMBlock *block, ram_addr_t offset);
 void *ram_load_host_from_stream_offset(QEMUFile *f,
                                        ram_addr_t offset,
                                        int flags,
