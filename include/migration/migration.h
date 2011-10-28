@@ -95,6 +95,7 @@ bool migration_has_finished(MigrationState *);
 bool migration_has_failed(MigrationState *);
 MigrationState *migrate_get_current(void);
 
+bool ram_save_block(QEMUFile *f, bool disable_xbzrle, bool last_stage);
 uint64_t ram_save_pending(QEMUFile *f, void *opaque, uint64_t max_size);
 uint64_t ram_bytes_remaining(void);
 uint64_t ram_bytes_transferred(void);

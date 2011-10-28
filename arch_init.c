@@ -349,6 +349,20 @@ ram_addr_t migration_bitmap_find_and_reset_dirty(MemoryRegion *mr,
     return (next - base) << TARGET_PAGE_BITS;
 }
 
+static inline bool migration_bitmap_test_and_reset_dirty(MemoryRegion *mr,
+                                                         ram_addr_t offset)
+{
+    bool ret;
+    int nr = (mr->ram_addr + offset) >> TARGET_PAGE_BITS;
+
+    ret = test_and_clear_bit(nr, migration_bitmap);
+
+    if (ret) {
+        migration_dirty_pages--;
+    }
+    return ret;
+}
+
 static inline bool migration_bitmap_set_dirty(MemoryRegion *mr,
                                               ram_addr_t offset)
 {
@@ -431,27 +445,93 @@ static void migration_bitmap_sync(void)
     }
 }
 
+static uint64_t bytes_transferred;
+
+void ram_save_page_reset(void)
+{
+    last_sent_block = NULL;
+}
+
+/*
+ * ram_save_page: Writes a page of memory to the stream f
+ */
+static void ram_save_page_do(QEMUFile *f, RAMBlock *block, ram_addr_t offset,
+                             bool disable_xbzrle, bool last_stage)
+{
+    uint8_t *p = memory_region_get_ram_ptr(block->mr) + offset;
+    int cont = (block == last_sent_block) ? RAM_SAVE_FLAG_CONTINUE : 0;
+    int bytes_sent = -1;
+    int ret;
+
+    /* In doubt sent page as normal */
+    ret = ram_control_save_page(f, block->offset,
+                                offset, TARGET_PAGE_SIZE, &bytes_sent);
+
+    if (ret != RAM_SAVE_CONTROL_NOT_SUPP) {
+        if (ret != RAM_SAVE_CONTROL_DELAYED) {
+            if (bytes_sent > 0) {
+                acct_info.norm_pages++;
+            } else if (bytes_sent == 0) {
+                acct_info.dup_pages++;
+            }
+        }
+    } else if (is_zero_page(p)) {
+        acct_info.dup_pages++;
+        bytes_sent = save_block_hdr(f, block, offset, cont,
+                                    RAM_SAVE_FLAG_COMPRESS);
+        qemu_put_byte(f, 0);
+        bytes_sent++;
+    } else if (!disable_xbzrle && migrate_use_xbzrle()) {
+        ram_addr_t current_addr = block->offset + offset;
+        bytes_sent = save_xbzrle_page(f, p, current_addr, block,
+                                      offset, cont, last_stage);
+        if (!last_stage) {
+            p = get_cached_data(XBZRLE.cache, current_addr);
+        }
+    }
+
+    /* XBZRLE overflow or normal page */
+    if (bytes_sent == -1) {
+        bytes_sent = save_block_hdr(f, block, offset, cont,
+                                    RAM_SAVE_FLAG_PAGE);
+        qemu_put_buffer_async(f, p, TARGET_PAGE_SIZE);
+        bytes_sent += TARGET_PAGE_SIZE;
+        acct_info.norm_pages++;
+    }
+
+    if (bytes_sent > 0) {
+        bytes_transferred += bytes_sent;
+        last_sent_block = block;
+    }
+}
+
+void ram_save_page(QEMUFile *f, RAMBlock *block, ram_addr_t offset)
+{
+    if (!migration_bitmap_test_and_reset_dirty(block->mr, offset)) {
+        return;
+    }
+    ram_save_page_do(f, block, offset, true, true);
+}
+
+
 /*
  * ram_save_block: Writes a page of memory to the stream f
  *
- * Returns:  The number of bytes written.
- *           0 means no dirty pages
+ * Returns: true:  there may be more dirty pages
+ *          false: if there are no more dirty pages
  */
-
-static int ram_save_block(QEMUFile *f, bool last_stage)
+bool ram_save_block(QEMUFile *f, bool disable_xbzrle, bool last_stage)
 {
     RAMBlock *block = last_seen_block;
     ram_addr_t offset = last_offset;
     bool complete_round = false;
-    int bytes_sent = 0;
-    MemoryRegion *mr;
-    ram_addr_t current_addr;
+    bool wrote = false;
 
     if (!block)
         block = QTAILQ_FIRST(&ram_list.blocks);
 
     while (true) {
-        mr = block->mr;
+        MemoryRegion *mr = block->mr;
         offset = migration_bitmap_find_and_reset_dirty(mr, offset);
         if (complete_round && block == last_seen_block &&
             offset >= last_offset) {
@@ -466,63 +546,17 @@ static int ram_save_block(QEMUFile *f, bool last_stage)
                 ram_bulk_stage = false;
             }
         } else {
-            int ret;
-            uint8_t *p;
-            int cont = (block == last_sent_block) ?
-                RAM_SAVE_FLAG_CONTINUE : 0;
-
-            p = memory_region_get_ram_ptr(mr) + offset;
-
-            /* In doubt sent page as normal */
-            bytes_sent = -1;
-            ret = ram_control_save_page(f, block->offset,
-                               offset, TARGET_PAGE_SIZE, &bytes_sent);
-
-            if (ret != RAM_SAVE_CONTROL_NOT_SUPP) {
-                if (ret != RAM_SAVE_CONTROL_DELAYED) {
-                    if (bytes_sent > 0) {
-                        acct_info.norm_pages++;
-                    } else if (bytes_sent == 0) {
-                        acct_info.dup_pages++;
-                    }
-                }
-            } else if (is_zero_page(p)) {
-                acct_info.dup_pages++;
-                bytes_sent = save_block_hdr(f, block, offset, cont,
-                                            RAM_SAVE_FLAG_COMPRESS);
-                qemu_put_byte(f, 0);
-                bytes_sent++;
-            } else if (!ram_bulk_stage && migrate_use_xbzrle()) {
-                current_addr = block->offset + offset;
-                bytes_sent = save_xbzrle_page(f, p, current_addr, block,
-                                              offset, cont, last_stage);
-                if (!last_stage) {
-                    p = get_cached_data(XBZRLE.cache, current_addr);
-                }
-            }
-
-            /* XBZRLE overflow or normal page */
-            if (bytes_sent == -1) {
-                bytes_sent = save_block_hdr(f, block, offset, cont, RAM_SAVE_FLAG_PAGE);
-                qemu_put_buffer_async(f, p, TARGET_PAGE_SIZE);
-                bytes_sent += TARGET_PAGE_SIZE;
-                acct_info.norm_pages++;
-            }
-
-            /* if page is unmodified, continue to the next */
-            if (bytes_sent > 0) {
-                last_sent_block = block;
-                break;
-            }
+            ram_save_page_do(f, block, offset,
+                             disable_xbzrle || ram_bulk_stage, last_stage);
+            wrote = true;
+            break;
         }
     }
     last_seen_block = block;
     last_offset = offset;
 
-    return bytes_sent;
+    return wrote;
 }
-
-static uint64_t bytes_transferred;
 
 void acct_update_position(QEMUFile *f, size_t size, bool zero)
 {
@@ -588,7 +622,7 @@ static void ram_migration_cancel(void *opaque)
 static void reset_ram_globals(void)
 {
     last_seen_block = NULL;
-    last_sent_block = NULL;
+    ram_save_page_reset();
     last_offset = 0;
     last_version = ram_list.version;
     ram_bulk_stage = true;
@@ -652,7 +686,7 @@ static int ram_save_iterate(QEMUFile *f, void *opaque)
     int ret;
     int i;
     int64_t t0;
-    int total_sent = 0;
+    bool sent = false;
 
     qemu_mutex_lock_ramlist();
 
@@ -665,14 +699,11 @@ static int ram_save_iterate(QEMUFile *f, void *opaque)
     t0 = qemu_get_clock_ns(rt_clock);
     i = 0;
     while ((ret = qemu_file_rate_limit(f)) == 0) {
-        int bytes_sent;
-
-        bytes_sent = ram_save_block(f, false);
-        /* no more blocks to sent */
-        if (bytes_sent == 0) {
+        if (!ram_save_block(f, false, false)) {
+            /* no more blocks to sent */
             break;
         }
-        total_sent += bytes_sent;
+        sent = true;
         acct_info.iterations++;
         check_guest_throttling();
         /* we want to check in the 1st loop, just in case it was the 1st time
@@ -700,15 +731,13 @@ static int ram_save_iterate(QEMUFile *f, void *opaque)
     ram_control_after_iterate(f, RAM_CONTROL_ROUND);
 
     if (ret < 0) {
-        bytes_transferred += total_sent;
         return ret;
     }
 
     qemu_put_be64(f, RAM_SAVE_FLAG_EOS);
-    total_sent += 8;
-    bytes_transferred += total_sent;
+    bytes_transferred += 8;
 
-    return total_sent;
+    return sent? 1: 0;
 }
 
 static int ram_save_complete(QEMUFile *f, void *opaque)
@@ -721,15 +750,8 @@ static int ram_save_complete(QEMUFile *f, void *opaque)
     /* try transferring iterative blocks of memory */
 
     /* flush all remaining blocks regardless of rate limiting */
-    while (true) {
-        int bytes_sent;
-
-        bytes_sent = ram_save_block(f, true);
-        /* no more blocks to sent */
-        if (bytes_sent == 0) {
-            break;
-        }
-        bytes_transferred += bytes_sent;
+    while (ram_save_block(f, false, true)) {
+        /* nothing */
     }
 
     ram_control_after_iterate(f, RAM_CONTROL_FINISH);
