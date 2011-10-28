@@ -26,12 +26,14 @@ typedef struct QEMUFileBuffered
     MigrationState *migration_state;
     QEMUFile *file;
     int freeze_output;
+    bool no_limit;
     size_t bytes_xfer;
     size_t xfer_limit;
     uint8_t *buffer;
     size_t buffer_size;
     size_t buffer_capacity;
     QEMUTimer *timer;
+    int unfreeze_fd;
 } QEMUFileBuffered;
 
 #ifdef DEBUG_BUFFERED_FILE
@@ -41,6 +43,16 @@ typedef struct QEMUFileBuffered
 #define DPRINTF(fmt, ...) \
     do { } while (0)
 #endif
+
+static ssize_t buffered_flush(QEMUFileBuffered *s);
+
+static void buffered_unfreeze(void *opaque)
+{
+    QEMUFileBuffered *s = opaque;
+    qemu_set_fd_handler(s->unfreeze_fd, NULL, NULL, NULL);
+    s->freeze_output = 0;
+    buffered_flush(s);
+}
 
 static void buffered_append(QEMUFileBuffered *s,
                             const uint8_t *buf, size_t size)
@@ -65,7 +77,8 @@ static ssize_t buffered_flush(QEMUFileBuffered *s)
 
     DPRINTF("flushing %zu byte(s) of data\n", s->buffer_size);
 
-    while (s->bytes_xfer < s->xfer_limit && offset < s->buffer_size) {
+    while ((s->bytes_xfer < s->xfer_limit && offset < s->buffer_size) ||
+           s->no_limit) {
 
         ret = migrate_fd_put_buffer(s->migration_state, s->buffer + offset,
                                     s->buffer_size - offset);
@@ -73,6 +86,15 @@ static ssize_t buffered_flush(QEMUFileBuffered *s)
             DPRINTF("backend not ready, freezing\n");
             ret = 0;
             s->freeze_output = 1;
+            if (!s->no_limit) {
+                if (s->unfreeze_fd == -1) {
+                    s->unfreeze_fd = dup(s->migration_state->fd);
+                }
+                if (s->unfreeze_fd >= 0) {
+                    qemu_set_fd_handler(s->unfreeze_fd,
+                                        NULL, buffered_unfreeze, s);
+                }
+            }
             break;
         }
 
@@ -113,7 +135,7 @@ static int buffered_put_buffer(void *opaque, const uint8_t *buf, int64_t pos, in
     s->freeze_output = 0;
 
     if (size > 0) {
-        DPRINTF("buffering %d bytes\n", size - offset);
+        DPRINTF("buffering %d bytes\n", size);
         buffered_append(s, buf, size);
     }
 
@@ -134,17 +156,11 @@ static int buffered_put_buffer(void *opaque, const uint8_t *buf, int64_t pos, in
     return size;
 }
 
-static int buffered_close(void *opaque)
+static void buffered_drain(QEMUFileBuffered *s)
 {
-    QEMUFileBuffered *s = opaque;
-    ssize_t ret = 0;
-    int ret2;
-
-    DPRINTF("closing\n");
-
     s->xfer_limit = INT_MAX;
     while (!qemu_file_get_error(s->file) && s->buffer_size) {
-        ret = buffered_flush(s);
+        ssize_t ret = buffered_flush(s);
         if (ret < 0) {
             break;
         }
@@ -153,12 +169,26 @@ static int buffered_close(void *opaque)
             if (ret < 0) {
                 break;
             }
+            s->freeze_output = 0;
         }
     }
+}
 
+static int buffered_close(void *opaque)
+{
+    QEMUFileBuffered *s = opaque;
+    ssize_t ret = 0;
+    int ret2;
+
+    DPRINTF("closing\n");
+
+    buffered_drain(s);
     ret2 = migrate_fd_close(s->migration_state);
     if (ret >= 0) {
         ret = ret2;
+    }
+    if (s->unfreeze_fd >= 0) {
+        close(s->unfreeze_fd);
     }
     qemu_del_timer(s->timer);
     qemu_free_timer(s->timer);
@@ -242,6 +272,7 @@ QEMUFile *qemu_fopen_ops_buffered(MigrationState *migration_state)
 
     s->migration_state = migration_state;
     s->xfer_limit = migration_state->bandwidth_limit / 10;
+    s->unfreeze_fd = -1;
 
     s->file = qemu_fopen_ops(s, buffered_put_buffer, NULL,
                              buffered_close, buffered_rate_limit,
@@ -253,4 +284,12 @@ QEMUFile *qemu_fopen_ops_buffered(MigrationState *migration_state)
     qemu_mod_timer(s->timer, qemu_get_clock_ms(rt_clock) + 100);
 
     return s->file;
+}
+
+void qemu_buffered_file_drain_buffer(void *buffered_file)
+{
+    QEMUFileBuffered *s = buffered_file;
+    s->no_limit = true;
+    buffered_drain(s);
+    s->no_limit = false;
 }
