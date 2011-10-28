@@ -45,4 +45,6 @@ CpuDefinitionInfoList *arch_query_cpu_definitions(Error **errp);
 #define RAM_SAVE_FLAG_CONTINUE 0x20
 #define RAM_SAVE_FLAG_XBZRLE   0x40
 
+#define RAM_SAVE_VERSION_ID     4 /* currently version 4 */
+
 #endif
