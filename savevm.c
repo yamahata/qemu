@@ -588,14 +588,14 @@ void qemu_put_byte(QEMUFile *f, int v)
         qemu_fflush(f);
 }
 
-static void qemu_file_skip(QEMUFile *f, int size)
+void qemu_file_skip(QEMUFile *f, int size)
 {
     if (f->buf_index + size <= f->buf_size) {
         f->buf_index += size;
     }
 }
 
-static int qemu_peek_buffer(QEMUFile *f, uint8_t *buf, int size, size_t offset)
+int qemu_peek_buffer(QEMUFile *f, uint8_t *buf, int size, size_t offset)
 {
     int pending;
     int index;
@@ -643,7 +643,7 @@ int qemu_get_buffer(QEMUFile *f, uint8_t *buf, int size)
     return done;
 }
 
-static int qemu_peek_byte(QEMUFile *f, int offset)
+int qemu_peek_byte(QEMUFile *f, int offset)
 {
     int index = f->buf_index + offset;
 
