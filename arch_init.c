@@ -376,7 +376,7 @@ int ram_load(QEMUFile *f, void *opaque, int version_id)
     int flags;
     int error;
 
-    if (version_id < 4 || version_id > 4) {
+    if (version_id < 4 || version_id > RAM_SAVE_VERSION_ID) {
         return -EINVAL;
     }
 

@@ -39,4 +39,6 @@ int xen_available(void);
 #define RAM_SAVE_FLAG_EOS      0x10
 #define RAM_SAVE_FLAG_CONTINUE 0x20
 
+#define RAM_SAVE_VERSION_ID     4 /* currently version 4 */
+
 #endif
