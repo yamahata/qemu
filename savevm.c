@@ -85,6 +85,7 @@
 #include "cpus.h"
 #include "memory.h"
 #include "qmp-commands.h"
+#include "buffered_file.h"
 
 #define SELF_ANNOUNCE_ROUNDS 5
 
@@ -475,6 +476,12 @@ void qemu_fflush(QEMUFile *f)
             qemu_file_set_error(f, -EINVAL);
         f->buf_index = 0;
     }
+}
+
+void qemu_buffered_file_drain(QEMUFile *f)
+{
+    qemu_fflush(f);
+    qemu_buffered_file_drain_buffer(f->opaque);
 }
 
 static void qemu_fill_buffer(QEMUFile *f)

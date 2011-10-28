@@ -26,5 +26,6 @@ QEMUFile *qemu_fopen_ops_buffered(void *opaque, size_t xfer_limit,
                                   BufferedPutReadyFunc *put_ready,
                                   BufferedWaitForUnfreezeFunc *wait_for_unfreeze,
                                   BufferedCloseFunc *close);
+void qemu_buffered_file_drain_buffer(void *buffered_file);
 
 #endif
