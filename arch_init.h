@@ -1,6 +1,8 @@
 #ifndef QEMU_ARCH_INIT_H
 #define QEMU_ARCH_INIT_H
 
+#include "qemu-common.h"
+
 extern const char arch_config_name[];
 
 enum {
@@ -40,5 +42,12 @@ int xen_available(void);
 #define RAM_SAVE_FLAG_CONTINUE 0x20
 
 #define RAM_SAVE_VERSION_ID     4 /* currently version 4 */
+
+#if defined(NEED_CPU_H) && !defined(CONFIG_USER_ONLY)
+void *ram_load_host_from_stream_offset(QEMUFile *f,
+                                       ram_addr_t offset,
+                                       int flags,
+                                       RAMBlock **last_blockp);
+#endif
 
 #endif
