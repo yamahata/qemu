@@ -47,4 +47,9 @@ CpuDefinitionInfoList *arch_query_cpu_definitions(Error **errp);
 
 #define RAM_SAVE_VERSION_ID     4 /* currently version 4 */
 
+void ram_save_page_reset(void);
+#if defined(NEED_CPU_H) && !defined(CONFIG_USER_ONLY)
+void ram_save_page(QEMUFile *f, RAMBlock *block, ram_addr_t offset);
+#endif
+
 #endif
