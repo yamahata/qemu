@@ -18,5 +18,6 @@
 #include "migration.h"
 
 QEMUFile *qemu_fopen_ops_buffered(MigrationState *migration_state);
+void qemu_buffered_file_drain_buffer(void *buffered_file);
 
 #endif
