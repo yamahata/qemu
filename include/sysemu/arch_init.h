@@ -46,4 +46,6 @@ CpuDefinitionInfoList *arch_query_cpu_definitions(Error **errp);
 #define RAM_SAVE_FLAG_XBZRLE   0x40
 /* 0x80 is reserved in migration.h start with 0x100 next */
 
+#define RAM_SAVE_VERSION_ID     4 /* currently version 4 */
+
 #endif
