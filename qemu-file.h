@@ -76,6 +76,7 @@ typedef struct QEMUFileBuf QEMUFileBuf;
 QEMUFileBuf *qemu_fopen_buf_write(void);
 QEMUFile *qemu_fopen_buf_read(uint8_t *buf, size_t size);
 int qemu_file_fd(QEMUFile *f);
+void qemu_buffered_file_drain(QEMUFile *f);
 int qemu_fclose(QEMUFile *f);
 int qemu_fflush(QEMUFile *f);
 void qemu_put_buffer(QEMUFile *f, const uint8_t *buf, int size);
