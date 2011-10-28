@@ -469,7 +469,7 @@ EQMP
 
     {
         .name       = "migrate",
-        .args_type  = "detach:-d,blk:-b,inc:-i,uri:s",
+        .args_type  = "detach:-d,blk:-b,inc:-i,postcopy:-p,nobg:-n,uri:s",
         .mhandler.cmd_new = qmp_marshal_input_migrate,
     },
 
@@ -483,6 +483,8 @@ Arguments:
 
 - "blk": block migration, full disk copy (json-bool, optional)
 - "inc": incremental disk copy (json-bool, optional)
+- "postcopy": postcopy migration (json-bool, optional)
+- "nobg": postcopy without background transfer (json-bool, optional)
 - "uri": Destination URI (json-string)
 
 Example:
