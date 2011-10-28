@@ -1804,7 +1804,8 @@ static int qemu_savevm_state(QEMUFile *f)
     int ret;
     MigrationParams params = {
         .blk = 0,
-        .shared = 0
+        .shared = 0,
+        .postcopy = 0,
     };
 
     if (qemu_savevm_state_blocked(NULL)) {
