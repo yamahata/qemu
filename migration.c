@@ -496,6 +496,15 @@ void qmp_migrate_set_downtime(double value, Error **errp)
     max_downtime = (uint64_t)value;
 }
 
+bool migrate_postcopy_outgoing(void)
+{
+    MigrationState *s;
+
+    s = migrate_get_current();
+
+    return s->enabled_capabilities[MIGRATION_CAPABILITY_POSTCOPY];
+}
+
 bool migrate_rdma_pin_all(void)
 {
     MigrationState *s;
