@@ -170,6 +170,15 @@ static int buffered_put_buffer(void *opaque, const uint8_t *buf, int64_t pos, in
     return offset;
 }
 
+static void buffered_drain(QEMUFileBuffered *s)
+{
+    while (!qemu_file_get_error(s->file) && s->buffer_size) {
+        buffered_flush(s);
+        if (s->freeze_output)
+            s->wait_for_unfreeze(s->opaque);
+    }
+}
+
 static int buffered_close(void *opaque)
 {
     QEMUFileBuffered *s = opaque;
@@ -177,11 +186,7 @@ static int buffered_close(void *opaque)
 
     DPRINTF("closing\n");
 
-    while (!qemu_file_get_error(s->file) && s->buffer_size) {
-        buffered_flush(s);
-        if (s->freeze_output)
-            s->wait_for_unfreeze(s->opaque);
-    }
+    buffered_drain(s);
 
     ret = s->close(s->opaque);
 
@@ -290,4 +295,9 @@ QEMUFile *qemu_fopen_ops_buffered(void *opaque,
     qemu_mod_timer(s->timer, qemu_get_clock_ms(rt_clock) + 100);
 
     return s->file;
+}
+
+void qemu_buffered_file_drain_buffer(void *buffered_file)
+{
+    buffered_drain(buffered_file);
 }
