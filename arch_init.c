@@ -399,59 +399,77 @@ static void migration_bitmap_sync(void)
     }
 }
 
+static uint64_t bytes_transferred;
+
+/*
+ * ram_save_page: Writes a page of memory to the stream f
+ *
+ * Returns:  true:  page written
+ *           false: no page written
+ */
+static const RAMBlock *last_sent_block = NULL;
+bool ram_save_page(QEMUFile *f, RAMBlock *block, ram_addr_t offset,
+                   bool last_stage)
+{
+    MemoryRegion *mr = block->mr;
+    uint8_t *p;
+    int cont;
+    int bytes_sent = -1;
+    ram_addr_t current_addr;
+
+    if (!migration_bitmap_test_and_reset_dirty(mr, offset)) {
+        return false;
+    }
+
+    cont = (block == last_sent_block) ? RAM_SAVE_FLAG_CONTINUE : 0;
+    last_sent_block = block;
+    p = memory_region_get_ram_ptr(mr) + offset;
+    if (is_dup_page(p)) {
+        acct_info.dup_pages++;
+        save_block_hdr(f, block, offset, cont, RAM_SAVE_FLAG_COMPRESS);
+        qemu_put_byte(f, *p);
+        bytes_sent = 1;
+    } else if (migrate_use_xbzrle()) {
+        current_addr = block->offset + offset;
+        bytes_sent = save_xbzrle_page(f, p, current_addr, block,
+                                      offset, cont, last_stage);
+        if (!last_stage) {
+            p = get_cached_data(XBZRLE.cache, current_addr);
+        }
+    }
+
+    /* either we didn't send yet (we may have had XBZRLE overflow) */
+    if (bytes_sent == -1) {
+        save_block_hdr(f, block, offset, cont, RAM_SAVE_FLAG_PAGE);
+        qemu_put_buffer(f, p, TARGET_PAGE_SIZE);
+        bytes_sent = TARGET_PAGE_SIZE;
+        acct_info.norm_pages++;
+    }
+
+    bytes_transferred += bytes_sent;
+    return true;
+}
+
 /*
  * ram_save_block: Writes a page of memory to the stream f
  *
- * Returns:  0: if the page hasn't changed
- *          -1: if there are no more dirty pages
- *           n: the amount of bytes written in other case
+ * Returns: true:  there may be more dirty pages
+ *          false: if there are no more dirty pages
  */
 
-static int ram_save_block(QEMUFile *f, bool last_stage)
+bool ram_save_block(QEMUFile *f, bool last_stage)
 {
     RAMBlock *block = last_block;
     ram_addr_t offset = last_offset;
-    int bytes_sent = -1;
-    MemoryRegion *mr;
-    ram_addr_t current_addr;
+    bool wrote = false;
 
     if (!block)
         block = QLIST_FIRST(&ram_list.blocks);
 
     do {
-        mr = block->mr;
-        if (migration_bitmap_test_and_reset_dirty(mr, offset)) {
-            uint8_t *p;
-            int cont = (block == last_block) ? RAM_SAVE_FLAG_CONTINUE : 0;
-
-            p = memory_region_get_ram_ptr(mr) + offset;
-
-            if (is_dup_page(p)) {
-                acct_info.dup_pages++;
-                save_block_hdr(f, block, offset, cont, RAM_SAVE_FLAG_COMPRESS);
-                qemu_put_byte(f, *p);
-                bytes_sent = 1;
-            } else if (migrate_use_xbzrle()) {
-                current_addr = block->offset + offset;
-                bytes_sent = save_xbzrle_page(f, p, current_addr, block,
-                                              offset, cont, last_stage);
-                if (!last_stage) {
-                    p = get_cached_data(XBZRLE.cache, current_addr);
-                }
-            }
-
-            /* either we didn't send yet (we may have had XBZRLE overflow) */
-            if (bytes_sent == -1) {
-                save_block_hdr(f, block, offset, cont, RAM_SAVE_FLAG_PAGE);
-                qemu_put_buffer(f, p, TARGET_PAGE_SIZE);
-                bytes_sent = TARGET_PAGE_SIZE;
-                acct_info.norm_pages++;
-            }
-
-            /* if page is unmodified, continue to the next */
-            if (bytes_sent != 0) {
-                break;
-            }
+        wrote = ram_save_page(f, block, offset, last_stage);
+        if (wrote) {
+            break;
         }
 
         offset += TARGET_PAGE_SIZE;
@@ -466,10 +484,8 @@ static int ram_save_block(QEMUFile *f, bool last_stage)
     last_block = block;
     last_offset = offset;
 
-    return bytes_sent;
+    return wrote;
 }
-
-static uint64_t bytes_transferred;
 
 static ram_addr_t ram_save_remaining(void)
 {
@@ -547,6 +563,7 @@ static void ram_migration_cancel(void *opaque)
 
 static void reset_ram_globals(void)
 {
+    last_sent_block = NULL;
     last_block = NULL;
     last_offset = 0;
     last_version = ram_list.version;
@@ -618,14 +635,10 @@ static int ram_save_iterate(QEMUFile *f, void *opaque)
 
     i = 0;
     while ((ret = qemu_file_rate_limit(f)) == 0) {
-        int bytes_sent;
-
-        bytes_sent = ram_save_block(f, false);
-        /* no more blocks to sent */
-        if (bytes_sent < 0) {
+        if (!ram_save_block(f, false)) {
+            /* no more blocks to sent */
             break;
         }
-        bytes_transferred += bytes_sent;
         acct_info.iterations++;
         /* we want to check in the 1st loop, just in case it was the 1st time
            and we had to sync the dirty bitmap.
@@ -683,15 +696,8 @@ static int ram_save_complete(QEMUFile *f, void *opaque)
     /* try transferring iterative blocks of memory */
 
     /* flush all remaining blocks regardless of rate limiting */
-    while (true) {
-        int bytes_sent;
-
-        bytes_sent = ram_save_block(f, true);
-        /* no more blocks to sent */
-        if (bytes_sent < 0) {
-            break;
-        }
-        bytes_transferred += bytes_sent;
+    while (!ram_save_block(f, true)) {
+        /* nothing */
     }
     memory_global_dirty_log_stop();
 
