@@ -374,21 +374,22 @@ int ram_save_live(QEMUFile *f, int stage, void *opaque)
     return (stage == 2) && (expected_time <= migrate_max_downtime());
 }
 
-static inline void *host_from_stream_offset(QEMUFile *f,
-                                            ram_addr_t offset,
-                                            int flags)
+void *ram_load_host_from_stream_offset(QEMUFile *f,
+                                       ram_addr_t offset,
+                                       int flags,
+                                       RAMBlock **last_blockp)
 {
-    static RAMBlock *block = NULL;
+    RAMBlock *block;
     char id[256];
     uint8_t len;
 
     if (flags & RAM_SAVE_FLAG_CONTINUE) {
-        if (!block) {
+        if (!(*last_blockp)) {
             fprintf(stderr, "Ack, bad migration stream!\n");
             return NULL;
         }
 
-        return memory_region_get_ram_ptr(block->mr) + offset;
+        return memory_region_get_ram_ptr((*last_blockp)->mr) + offset;
     }
 
     len = qemu_get_byte(f);
@@ -396,12 +397,22 @@ static inline void *host_from_stream_offset(QEMUFile *f,
     id[len] = 0;
 
     QLIST_FOREACH(block, &ram_list.blocks, next) {
-        if (!strncmp(id, block->idstr, sizeof(id)))
+        if (!strncmp(id, block->idstr, sizeof(id))) {
+            *last_blockp = block;
             return memory_region_get_ram_ptr(block->mr) + offset;
+        }
     }
 
     fprintf(stderr, "Can't find block %s!\n", id);
     return NULL;
+}
+
+static inline void *host_from_stream_offset(QEMUFile *f,
+                                            ram_addr_t offset,
+                                            int flags)
+{
+    static RAMBlock *block = NULL;
+    return ram_load_host_from_stream_offset(f, offset, flags, &block);
 }
 
 int ram_load(QEMUFile *f, void *opaque, int version_id)
