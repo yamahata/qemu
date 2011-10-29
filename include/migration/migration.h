@@ -89,6 +89,8 @@ bool migration_is_active(MigrationState *);
 bool migration_has_finished(MigrationState *);
 bool migration_has_failed(MigrationState *);
 MigrationState *migrate_get_current(void);
+void migration_bitmap_init(void);
+void migration_bitmap_free(void);
 
 bool ram_save_block(QEMUFile *f, bool disable_xbzrle, bool last_stage);
 uint64_t ram_save_pending(QEMUFile *f, void *opaque, uint64_t max_size);
