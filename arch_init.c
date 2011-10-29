@@ -330,6 +330,22 @@ static unsigned long *migration_bitmap;
 static uint64_t migration_dirty_pages;
 static uint32_t last_version;
 
+void migration_bitmap_init(void)
+{
+    int64_t ram_pages = last_ram_offset() >> TARGET_PAGE_BITS;
+    if (!migration_bitmap) {
+        migration_bitmap = bitmap_new(ram_pages);
+    }
+    bitmap_set(migration_bitmap, 1, ram_pages);
+    migration_dirty_pages = ram_pages;
+}
+
+void migration_bitmap_free(void)
+{
+    g_free(migration_bitmap);
+    migration_bitmap = NULL;
+}
+
 static inline bool migration_bitmap_test_and_reset_dirty(MemoryRegion *mr,
                                                          ram_addr_t offset)
 {
@@ -575,11 +591,7 @@ static void reset_ram_globals(void)
 static int ram_save_setup(QEMUFile *f, void *opaque)
 {
     RAMBlock *block;
-    int64_t ram_pages = last_ram_offset() >> TARGET_PAGE_BITS;
-
-    migration_bitmap = bitmap_new(ram_pages);
-    bitmap_set(migration_bitmap, 1, ram_pages);
-    migration_dirty_pages = ram_pages;
+    migration_bitmap_init();
 
     qemu_mutex_lock_ramlist();
     bytes_transferred = 0;
@@ -704,8 +716,7 @@ static int ram_save_complete(QEMUFile *f, void *opaque)
     qemu_mutex_unlock_ramlist();
     qemu_put_be64(f, RAM_SAVE_FLAG_EOS);
 
-    g_free(migration_bitmap);
-    migration_bitmap = NULL;
+    migration_bitmap_free();
 
     return 0;
 }
