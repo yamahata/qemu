@@ -326,6 +326,22 @@ static uint64_t migration_dirty_pages;
 static uint32_t last_version;
 static bool ram_bulk_stage;
 
+void migration_bitmap_init(void)
+{
+    int64_t ram_pages = last_ram_offset() >> TARGET_PAGE_BITS;
+    if (!migration_bitmap) {
+        migration_bitmap = bitmap_new(ram_pages);
+    }
+    bitmap_set(migration_bitmap, 0, ram_pages);
+    migration_dirty_pages = ram_pages;
+}
+
+void migration_bitmap_free(void)
+{
+    g_free(migration_bitmap);
+    migration_bitmap = NULL;
+}
+
 static inline
 ram_addr_t migration_bitmap_find_and_reset_dirty(MemoryRegion *mr,
                                                  ram_addr_t start)
@@ -605,8 +621,7 @@ static void migration_end(void)
 {
     if (migration_bitmap) {
         memory_global_dirty_log_stop();
-        g_free(migration_bitmap);
-        migration_bitmap = NULL;
+        migration_bitmap_free();
     }
 
     if (XBZRLE.cache) {
@@ -638,11 +653,8 @@ static void reset_ram_globals(void)
 static int ram_save_setup(QEMUFile *f, void *opaque)
 {
     RAMBlock *block;
-    int64_t ram_pages = last_ram_offset() >> TARGET_PAGE_BITS;
 
-    migration_bitmap = bitmap_new(ram_pages);
-    bitmap_set(migration_bitmap, 0, ram_pages);
-    migration_dirty_pages = ram_pages;
+    migration_bitmap_init();
     mig_throttle_on = false;
     dirty_rate_high_cnt = 0;
 
