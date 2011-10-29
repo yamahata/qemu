@@ -95,6 +95,8 @@ bool ram_save_block(QEMUFile *f, bool last_stage);
 uint64_t ram_bytes_remaining(void);
 uint64_t ram_bytes_transferred(void);
 uint64_t ram_bytes_total(void);
+void migration_bitmap_init(void);
+void migration_bitmap_free(void);
 
 extern SaveVMHandlers savevm_ram_handlers;
 
