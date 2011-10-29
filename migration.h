@@ -78,6 +78,7 @@ uint64_t ram_bytes_total(void);
 
 void sort_ram_list(void);
 int ram_save_block(QEMUFile *f);
+void ram_save_memory_set_dirty(void);
 void ram_save_live_mem_size(QEMUFile *f);
 int ram_save_live(QEMUFile *f, int stage, void *opaque);
 int ram_load(QEMUFile *f, void *opaque, int version_id);

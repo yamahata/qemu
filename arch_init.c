@@ -311,9 +311,23 @@ void ram_save_live_mem_size(QEMUFile *f)
     }
 }
 
+void ram_save_memory_set_dirty(void)
+{
+    RAMBlock *block;
+
+    QLIST_FOREACH(block, &ram_list.blocks, next) {
+        ram_addr_t addr;
+        for (addr = 0; addr < block->length; addr += TARGET_PAGE_SIZE) {
+            if (!memory_region_get_dirty(block->mr, addr, TARGET_PAGE_SIZE,
+                                         DIRTY_MEMORY_MIGRATION)) {
+                memory_region_set_dirty(block->mr, addr, TARGET_PAGE_SIZE);
+            }
+        }
+    }
+}
+
 int ram_save_live(QEMUFile *f, int stage, void *opaque)
 {
-    ram_addr_t addr;
     uint64_t bytes_transferred_last;
     double bwidth = 0;
     uint64_t expected_time = 0;
@@ -327,7 +341,6 @@ int ram_save_live(QEMUFile *f, int stage, void *opaque)
     memory_global_sync_dirty_bitmap(get_system_memory());
 
     if (stage == 1) {
-        RAMBlock *block;
         bytes_transferred = 0;
         last_block_sent = NULL;
         last_block = NULL;
@@ -335,17 +348,8 @@ int ram_save_live(QEMUFile *f, int stage, void *opaque)
         sort_ram_list();
 
         /* Make sure all dirty bits are set */
-        QLIST_FOREACH(block, &ram_list.blocks, next) {
-            for (addr = 0; addr < block->length; addr += TARGET_PAGE_SIZE) {
-                if (!memory_region_get_dirty(block->mr, addr, TARGET_PAGE_SIZE,
-                                             DIRTY_MEMORY_MIGRATION)) {
-                    memory_region_set_dirty(block->mr, addr, TARGET_PAGE_SIZE);
-                }
-            }
-        }
-
+        ram_save_memory_set_dirty();
         memory_global_dirty_log_start();
-
         ram_save_live_mem_size(f);
     }
 
