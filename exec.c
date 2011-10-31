@@ -2782,15 +2782,7 @@ void qemu_ram_remap(ram_addr_t addr, ram_addr_t length)
 }
 #endif /* !_WIN32 */
 
-/* Return a host pointer to ram allocated with qemu_ram_alloc.
-   With the exception of the softmmu code in this file, this should
-   only be used for local memory (e.g. video ram) that the device owns,
-   and knows it isn't going to access beyond the end of the block.
-
-   It should not be used for general purpose DMA.
-   Use cpu_physical_memory_map/cpu_physical_memory_rw instead.
- */
-void *qemu_get_ram_ptr(ram_addr_t addr)
+RAMBlock *qemu_get_ram_block(ram_addr_t addr)
 {
     RAMBlock *block;
 
@@ -2801,19 +2793,7 @@ void *qemu_get_ram_ptr(ram_addr_t addr)
                 QLIST_REMOVE(block, next);
                 QLIST_INSERT_HEAD(&ram_list.blocks, block, next);
             }
-            if (xen_enabled()) {
-                /* We need to check if the requested address is in the RAM
-                 * because we don't want to map the entire memory in QEMU.
-                 * In that case just map until the end of the page.
-                 */
-                if (block->offset == 0) {
-                    return xen_map_cache(addr, 0, 0);
-                } else if (block->host == NULL) {
-                    block->host =
-                        xen_map_cache(block->offset, block->length, 1);
-                }
-            }
-            return block->host + (addr - block->offset);
+            return block;
         }
     }
 
@@ -2821,6 +2801,33 @@ void *qemu_get_ram_ptr(ram_addr_t addr)
     abort();
 
     return NULL;
+}
+
+/* Return a host pointer to ram allocated with qemu_ram_alloc.
+   With the exception of the softmmu code in this file, this should
+   only be used for local memory (e.g. video ram) that the device owns,
+   and knows it isn't going to access beyond the end of the block.
+
+   It should not be used for general purpose DMA.
+   Use cpu_physical_memory_map/cpu_physical_memory_rw instead.
+ */
+void *qemu_get_ram_ptr(ram_addr_t addr)
+{
+    RAMBlock *block = qemu_get_ram_block(addr);
+
+    if (xen_enabled()) {
+        /* We need to check if the requested address is in the RAM
+         * because we don't want to map the entire memory in QEMU.
+         * In that case just map until the end of the page.
+         */
+        if (block->offset == 0) {
+            return xen_map_cache(addr, 0, 0);
+        } else if (block->host == NULL) {
+            block->host =
+                xen_map_cache(block->offset, block->length, 1);
+        }
+    }
+    return block->host + (addr - block->offset);
 }
 
 /* Return a host pointer to ram allocated with qemu_ram_alloc.
