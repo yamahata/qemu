@@ -508,6 +508,8 @@ extern RAMList ram_list;
 extern const char *mem_path;
 extern int mem_prealloc;
 
+RAMBlock *qemu_get_ram_block(ram_addr_t adar);
+
 /* Flags stored in the low bits of the TLB virtual address.  These are
    defined so that fast path ram access is all zeros.  */
 /* Zero if TLB entry is valid.  */
