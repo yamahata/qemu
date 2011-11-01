@@ -25,6 +25,7 @@
 
 #ifndef CONFIG_USER_ONLY
 
+ram_addr_t qemu_last_ram_offset(void);
 ram_addr_t qemu_ram_alloc_from_ptr(ram_addr_t size, void *host,
                                    MemoryRegion *mr);
 ram_addr_t qemu_ram_alloc(ram_addr_t size, MemoryRegion *mr);
