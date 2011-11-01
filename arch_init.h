@@ -45,6 +45,7 @@ void *ram_load_host_from_stream_offset(QEMUFile *f,
                                        ram_addr_t offset,
                                        int flags,
                                        RAMBlock **last_blockp);
+int ram_load_mem_size(QEMUFile *f, ram_addr_t total_ram_bytes);
 #endif
 
 #endif
