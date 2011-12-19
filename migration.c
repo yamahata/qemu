@@ -25,7 +25,7 @@
 #include "qmp-commands.h"
 #include "trace.h"
 
-//#define DEBUG_MIGRATION
+#define DEBUG_MIGRATION
 
 #ifdef DEBUG_MIGRATION
 #define DPRINTF(fmt, ...) \
