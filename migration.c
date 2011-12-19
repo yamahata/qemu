@@ -23,7 +23,7 @@
 #include "block-migration.h"
 #include "qmp-commands.h"
 
-//#define DEBUG_MIGRATION
+#define DEBUG_MIGRATION
 
 #ifdef DEBUG_MIGRATION
 #define DPRINTF(fmt, ...) \
