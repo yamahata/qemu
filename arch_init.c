@@ -50,6 +50,8 @@
 #include "exec/cpu-all.h"
 #include "hw/acpi/acpi.h"
 
+#define DEBUG_ARCH_INIT
+
 #ifdef DEBUG_ARCH_INIT
 #define DPRINTF(fmt, ...) \
     do { fprintf(stdout, "arch_init: " fmt, ## __VA_ARGS__); } while (0)
@@ -256,6 +258,7 @@ static size_t save_block_hdr(QEMUFile *f, RAMBlock *block, ram_addr_t offset,
         qemu_put_buffer(f, (uint8_t *)block->idstr,
                         strlen(block->idstr));
         size += 1 + strlen(block->idstr);
+        DPRINTF("idstr %s\n", block->idstr);
     }
     return size;
 }
@@ -925,6 +928,7 @@ int ram_load_mem_size(QEMUFile *f, ram_addr_t total_ram_bytes)
     char id[256];
     ram_addr_t length;
 
+    DPRINTF("total_ram_bytes %lx\n", total_ram_bytes);
     while (total_ram_bytes) {
         RAMBlock *block;
         uint8_t len;
