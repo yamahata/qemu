@@ -1707,9 +1707,13 @@ int qemu_savevm_state_complete(QEMUFile *f, bool postcopy)
 
     cpu_synchronize_all_states();
 
+    fprintf(stderr, "%s:%d\n", __func__, __LINE__);
+
     QTAILQ_FOREACH(se, &savevm_handlers, entry) {
         if (se->save_live_state == NULL)
             continue;
+
+        fprintf(stderr, "%s:%d idstr: %s\n", __func__, __LINE__, se->idstr);
 
         /* Section type */
         qemu_put_byte(f, QEMU_VM_SECTION_END);
@@ -1733,6 +1737,8 @@ int qemu_savevm_state_complete(QEMUFile *f, bool postcopy)
 	if (se->save_state == NULL && se->vmsd == NULL)
 	    continue;
 
+        fprintf(stderr, "%s:%d idstr: %s\n", __func__, __LINE__, se->idstr);
+
         /* Section type */
         qemu_put_byte(f, QEMU_VM_SECTION_FULL);
         qemu_put_be32(f, se->section_id);
@@ -1746,9 +1752,12 @@ int qemu_savevm_state_complete(QEMUFile *f, bool postcopy)
         qemu_put_be32(f, se->version_id);
 
         vmstate_save(f, se);
+        fprintf(stderr, "%s:%d idstr: %s done\n",
+                __func__, __LINE__, se->idstr);
     }
 
     qemu_put_byte(f, QEMU_VM_EOF);
+    fprintf(stderr, "%s:%d QEMU_VM_EOF\n", __func__, __LINE__);
 
     if (postcopy) {
         qemu_fflush(f);
