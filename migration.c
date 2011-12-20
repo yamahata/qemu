@@ -242,7 +242,7 @@ void qmp_migrate_set_capabilities(MigrationCapabilityStatusList *params,
 
 /* shared migration helpers */
 
-static int migrate_fd_cleanup(MigrationState *s)
+int migrate_fd_cleanup(MigrationState *s)
 {
     int ret = 0;
 
@@ -272,7 +272,7 @@ void migrate_fd_error(MigrationState *s)
     migrate_fd_cleanup(s);
 }
 
-static void migrate_fd_completed(MigrationState *s)
+void migrate_fd_completed(MigrationState *s)
 {
     DPRINTF("setting completed state\n");
     if (migrate_fd_cleanup(s) < 0) {
