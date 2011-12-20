@@ -84,6 +84,19 @@ const char arch_config_name[] = CONFIG_QEMU_CONFDIR "/target-" TARGET_ARCH ".con
 #define QEMU_ARCH QEMU_ARCH_XTENSA
 #endif
 
+#define DEBUG_ARCH_INIT
+
+#ifdef DEBUG_ARCH_INIT
+#include <sys/syscall.h>
+#define DPRINTF(fmt, ...)                                           \
+    do {                                                            \
+        printf("%d:%ld %s:%d: " fmt, getpid(), syscall(SYS_gettid), \
+               __func__, __LINE__, ## __VA_ARGS__);                 \
+    } while (0)
+#else
+#define DPRINTF(fmt, ...)       do { } while (0)
+#endif
+
 const uint32_t arch_type = QEMU_ARCH;
 
 /***********************************************************/
@@ -154,6 +167,7 @@ static int ram_save_page_int(QEMUFile *f, RAMBlock *block, ram_addr_t offset)
         if (!cont) {
             qemu_put_byte(f, strlen(block->idstr));
             qemu_put_buffer(f, (uint8_t *)block->idstr, strlen(block->idstr));
+            DPRINTF("idstr %s\n", block->idstr);
         }
         qemu_put_byte(f, *p);
         return 1;
@@ -163,6 +177,7 @@ static int ram_save_page_int(QEMUFile *f, RAMBlock *block, ram_addr_t offset)
     if (!cont) {
         qemu_put_byte(f, strlen(block->idstr));
         qemu_put_buffer(f, (uint8_t *)block->idstr, strlen(block->idstr));
+        DPRINTF("idstr %s\n", block->idstr);
     }
     qemu_put_buffer(f, p, TARGET_PAGE_SIZE);
     return TARGET_PAGE_SIZE;
@@ -434,6 +449,7 @@ int ram_load_mem_size(QEMUFile *f, ram_addr_t total_ram_bytes)
     char id[256];
     ram_addr_t length;
 
+    DPRINTF("total_ram_bytes %lx\n", total_ram_bytes);
     while (total_ram_bytes) {
         RAMBlock *block;
         uint8_t len;
