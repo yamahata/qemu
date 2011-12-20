@@ -61,7 +61,9 @@ int fd_start_incoming_migration(const char *path);
 
 int fd_start_outgoing_migration(MigrationState *s, const char *fdname);
 
+int migrate_fd_cleanup(MigrationState *s);
 void migrate_fd_error(MigrationState *s);
+void migrate_fd_completed(MigrationState *s);
 
 void migrate_fd_connect(MigrationState *s);
 
