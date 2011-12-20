@@ -1749,6 +1749,8 @@ int qemu_savevm_state_complete(QEMUFile *f, const MigrationParams *params)
 
     cpu_synchronize_all_states();
 
+    fprintf(stderr, "%s:%d\n", __func__, __LINE__);
+
     QTAILQ_FOREACH(se, &savevm_handlers, entry) {
         if (!se->ops || !se->ops->save_live_complete) {
             continue;
@@ -1759,6 +1761,8 @@ int qemu_savevm_state_complete(QEMUFile *f, const MigrationParams *params)
             }
         }
         trace_savevm_section_start();
+        fprintf(stderr, "%s:%d idstr: %s\n", __func__, __LINE__, se->idstr);
+
         /* Section type */
         qemu_put_byte(f, QEMU_VM_SECTION_END);
         qemu_put_be32(f, se->section_id);
@@ -1791,6 +1795,8 @@ int qemu_savevm_state_complete(QEMUFile *f, const MigrationParams *params)
 	    continue;
         }
         trace_savevm_section_start();
+        fprintf(stderr, "%s:%d idstr: %s\n", __func__, __LINE__, se->idstr);
+
         /* Section type */
         qemu_put_byte(f, QEMU_VM_SECTION_FULL);
         qemu_put_be32(f, se->section_id);
@@ -1805,9 +1811,12 @@ int qemu_savevm_state_complete(QEMUFile *f, const MigrationParams *params)
 
         vmstate_save(f, se);
         trace_savevm_section_end(se->section_id);
+        fprintf(stderr, "%s:%d idstr: %s done\n",
+                __func__, __LINE__, se->idstr);
     }
 
     qemu_put_byte(f, QEMU_VM_EOF);
+    fprintf(stderr, "%s:%d QEMU_VM_EOF\n", __func__, __LINE__);
 
     if (params->postcopy) {
         qemu_fflush(f);
