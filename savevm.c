@@ -595,6 +595,11 @@ void qemu_file_skip(QEMUFile *f, int size)
     }
 }
 
+int qemu_pending_size(const QEMUFile *f)
+{
+    return f->buf_size - f->buf_index;
+}
+
 int qemu_peek_buffer(QEMUFile *f, uint8_t *buf, int size, size_t offset)
 {
     int pending;
