@@ -91,6 +91,7 @@ int qemu_get_byte(QEMUFile *f);
 int qemu_peek_byte(QEMUFile *f, int offset);
 int qemu_peek_buffer(QEMUFile *f, uint8_t *buf, int size, size_t offset);
 void qemu_file_skip(QEMUFile *f, int size);
+int qemu_pending_size(const QEMUFile *f);
 
 static inline unsigned int qemu_get_ubyte(QEMUFile *f)
 {
