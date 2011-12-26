@@ -33,7 +33,7 @@
 #include "hw/hw.h"
 #include "umem.h"
 
-//#define DEBUG_UMEM
+#define DEBUG_UMEM
 #ifdef DEBUG_UMEM
 #include <sys/syscall.h>
 #define DPRINTF(format, ...)                                            \
