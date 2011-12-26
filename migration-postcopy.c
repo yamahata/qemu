@@ -40,7 +40,7 @@
 #include "memory.h"
 #include "cpu-common.h"
 
-//#define DEBUG_POSTCOPY
+#define DEBUG_POSTCOPY
 #ifdef DEBUG_POSTCOPY
 #ifdef CONFIG_LINUX
 #include <sys/syscall.h>
