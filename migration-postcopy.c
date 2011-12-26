@@ -40,7 +40,7 @@
 #include "memory.h"
 #include "cpu-common.h"
 
-//#define DEBUG_POSTCOPY
+#define DEBUG_POSTCOPY
 #ifdef DEBUG_POSTCOPY
 #define DPRINTF(fmt, ...)                                               \
     do {                                                                \
