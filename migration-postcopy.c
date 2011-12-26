@@ -39,7 +39,7 @@
 #define WANT_EXEC_OBSOLETE
 #include "exec-obsolete.h"
 
-//#define DEBUG_POSTCOPY
+#define DEBUG_POSTCOPY
 #ifdef DEBUG_POSTCOPY
 #include <sys/syscall.h>
 #define DPRINTF(fmt, ...)                                               \
