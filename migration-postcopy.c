@@ -41,7 +41,7 @@
 #include "qemu/thread.h"
 #include "migration/umem.h"
 
-//#define DEBUG_POSTCOPY
+#define DEBUG_POSTCOPY
 #ifdef DEBUG_POSTCOPY
 #ifdef CONFIG_LINUX
 #include <sys/syscall.h>
