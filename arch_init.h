@@ -45,6 +45,7 @@ int xen_available(void);
 
 #if defined(NEED_CPU_H) && !defined(CONFIG_USER_ONLY)
 int ram_save_page(QEMUFile *f, RAMBlock *block, ram_addr_t offset);
+RAMBlock *ram_find_block(const char *id, uint8_t len);
 void *ram_load_host_from_stream_offset(QEMUFile *f,
                                        ram_addr_t offset,
                                        int flags,

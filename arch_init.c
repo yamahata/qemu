@@ -363,6 +363,19 @@ int ram_save_live(QEMUFile *f, int stage, void *opaque)
     return (stage == 2) && (expected_time <= migrate_max_downtime());
 }
 
+RAMBlock *ram_find_block(const char *id, uint8_t len)
+{
+    RAMBlock *block;
+
+    QLIST_FOREACH(block, &ram_list.blocks, next) {
+        if (!strncmp(id, block->idstr, len)) {
+            return block;
+        }
+    }
+
+    return NULL;
+}
+
 void *ram_load_host_from_stream_offset(QEMUFile *f,
                                        ram_addr_t offset,
                                        int flags,
