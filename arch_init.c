@@ -398,11 +398,10 @@ void *ram_load_host_from_stream_offset(QEMUFile *f,
     qemu_get_buffer(f, (uint8_t *)id, len);
     id[len] = 0;
 
-    QLIST_FOREACH(block, &ram_list.blocks, next) {
-        if (!strncmp(id, block->idstr, sizeof(id))) {
-            *last_blockp = block;
-            return memory_region_get_ram_ptr(block->mr) + offset;
-        }
+    block = ram_find_block(id, len);
+    if (block) {
+        *last_blockp = block;
+        return memory_region_get_ram_ptr(block->mr) + offset;
     }
 
     fprintf(stderr, "Can't find block %s!\n", id);
@@ -432,17 +431,13 @@ int ram_load_mem_size(QEMUFile *f, ram_addr_t total_ram_bytes)
         id[len] = 0;
         length = qemu_get_be64(f);
 
-        QLIST_FOREACH(block, &ram_list.blocks, next) {
-            if (!strncmp(id, block->idstr, sizeof(id))) {
-                if (block->length != length)
-                    return -EINVAL;
-                break;
-            }
-        }
-
+        block = ram_find_block(id, len);
         if (!block) {
             fprintf(stderr, "Unknown ramblock \"%s\", cannot "
                     "accept migration\n", id);
+            return -EINVAL;
+        }
+        if (block->length != length) {
             return -EINVAL;
         }
 
