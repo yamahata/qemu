@@ -33,6 +33,7 @@
 #include "kvm.h"
 #include "hw/xen.h"
 #include "qemu-timer.h"
+#include "arch_init.h"
 #include "memory.h"
 #include "exec-memory.h"
 #if defined(CONFIG_USER_ONLY)
@@ -2517,12 +2518,11 @@ void qemu_ram_set_idstr(ram_addr_t addr, const char *name, DeviceState *dev)
     pstrcat(new_block->idstr, sizeof(new_block->idstr), name);
 
     qemu_mutex_lock_ramlist();
-    QLIST_FOREACH(block, &ram_list.blocks, next) {
-        if (block != new_block && !strcmp(block->idstr, new_block->idstr)) {
-            fprintf(stderr, "RAMBlock \"%s\" already registered, abort!\n",
-                    new_block->idstr);
-            abort();
-        }
+    block = ram_find_block(new_block->idstr, strlen(new_block->idstr));
+    if (block != new_block) {
+        fprintf(stderr, "RAMBlock \"%s\" already registered, abort!\n",
+                new_block->idstr);
+        abort();
     }
     qemu_mutex_unlock_ramlist();
 }
