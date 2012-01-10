@@ -90,6 +90,23 @@ int fd_start_outgoing_migration(MigrationState *s, const char *fdname)
     s->write = fd_write;
     s->close = fd_close;
 
+    if (s->params.postcopy) {
+        int flags = fcntl(s->fd, F_GETFL);
+        if ((flags & O_ACCMODE) != O_RDWR) {
+            goto err_after_open;
+        }
+
+        s->fd_read = dup(s->fd);
+        if (s->fd_read == -1) {
+            goto err_after_open;
+        }
+        s->file_read = qemu_fopen_fd(s->fd_read);
+        if (s->file_read == NULL) {
+            close(s->fd_read);
+            goto err_after_open;
+        }
+    }
+
     migrate_fd_connect(s);
     return 0;
 

@@ -154,6 +154,13 @@ static int is_dup_page(uint8_t *page)
     return 1;
 }
 
+static bool outgoing_postcopy = false;
+
+void ram_save_set_params(const MigrationParams *params, void *opaque)
+{
+    outgoing_postcopy = params->postcopy;
+}
+
 static RAMBlock *last_block_sent = NULL;
 static uint64_t bytes_transferred;
 
@@ -343,6 +350,15 @@ int ram_save_live(QEMUFile *f, int stage, void *opaque)
     uint64_t expected_time = 0;
     int ret;
 
+    if (stage == 1) {
+        bytes_transferred = 0;
+        last_block_sent = NULL;
+        ram_save_set_last_block(NULL, 0);
+    }
+    if (outgoing_postcopy) {
+        return postcopy_outgoing_ram_save_live(f, stage, opaque);
+    }
+
     if (stage < 0) {
         memory_global_dirty_log_stop();
         return 0;
@@ -351,9 +367,6 @@ int ram_save_live(QEMUFile *f, int stage, void *opaque)
     memory_global_sync_dirty_bitmap(get_system_memory());
 
     if (stage == 1) {
-        bytes_transferred = 0;
-        last_block_sent = NULL;
-        ram_save_set_last_block(NULL, 0);
         sort_ram_list();
 
         /* Make sure all dirty bits are set */

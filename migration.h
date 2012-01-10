@@ -39,6 +39,12 @@ struct MigrationState
     int (*write)(MigrationState *s, const void *buff, size_t size);
     void *opaque;
     MigrationParams params;
+
+    /* for postcopy */
+    int substate;              /* precopy or postcopy */
+    int fd_read;
+    QEMUFile *file_read;        /* connection from the detination */
+    void *postcopy;
 };
 
 void process_incoming_migration(QEMUFile *f);
@@ -105,6 +111,12 @@ void migrate_add_blocker(Error *reason);
  * @reason - the error blocking migration
  */
 void migrate_del_blocker(Error *reason);
+
+/* For outgoing postcopy */
+int postcopy_outgoing_create_read_socket(MigrationState *s);
+int postcopy_outgoing_ram_save_live(QEMUFile *f, int stage, void *opaque);
+void *postcopy_outgoing_begin(MigrationState *s);
+int postcopy_outgoing_ram_save_background(QEMUFile *f, void *postcopy);
 
 /* For incoming postcopy */
 extern bool incoming_postcopy;

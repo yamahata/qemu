@@ -65,23 +65,32 @@ static void tcp_wait_for_connect(void *opaque)
     } while (ret == -1 && (socket_error()) == EINTR);
 
     if (ret < 0) {
-        migrate_fd_error(s);
-        return;
+        goto error_out;
     }
 
     qemu_set_fd_handler2(s->fd, NULL, NULL, NULL, NULL);
 
-    if (val == 0)
+    if (val == 0) {
+        ret = postcopy_outgoing_create_read_socket(s);
+        if (ret < 0) {
+            goto error_out;
+        }
         migrate_fd_connect(s);
-    else {
+    } else {
         DPRINTF("error connecting %d\n", val);
-        migrate_fd_error(s);
+        goto error_out;
     }
+    return;
+
+error_out:
+    migrate_fd_error(s);
 }
 
 int tcp_start_outgoing_migration(MigrationState *s, const char *host_port,
                                  Error **errp)
 {
+    int ret;
+
     s->get_error = socket_errno;
     s->write = socket_write;
     s->close = tcp_close;
@@ -103,6 +112,12 @@ int tcp_start_outgoing_migration(MigrationState *s, const char *host_port,
     } else {
         DPRINTF("unknown error\n");
         return -1;
+    }
+
+    ret = postcopy_outgoing_create_read_socket(s);
+    if (ret < 0) {
+        migrate_fd_error(s);
+        return ret;
     }
 
     return 0;
