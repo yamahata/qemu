@@ -106,6 +106,121 @@ static void buffer_flush(QEMUBuffer *buf, QEMUFile *file,
 
 
 /***************************************************************************
+ * Nonblocking write only file
+ */
+static ssize_t nonblock_flush_buffer_putbuf(void *opaque,
+                                            const void *data, size_t size)
+{
+    QEMUFileNonblock *s = opaque;
+    ssize_t ret = write(s->fd, data, size);
+    if (ret == -1) {
+        return -errno;
+    }
+    return ret;
+}
+
+static void nonblock_flush_buffer(QEMUFileNonblock *s)
+{
+    buffer_flush(&s->buf, s->file, s, &nonblock_flush_buffer_putbuf);
+
+    if (s->buf.buffer_size > 0) {
+        s->buf.freeze_output = true;
+    }
+}
+
+static int nonblock_put_buffer(void *opaque,
+                               const uint8_t *buf, int64_t pos, int size)
+{
+    QEMUFileNonblock *s = opaque;
+    int error;
+    ssize_t len = 0;
+
+    error = qemu_file_get_error(s->file);
+    if (error) {
+        return error;
+    }
+
+    nonblock_flush_buffer(s);
+    error = qemu_file_get_error(s->file);
+    if (error) {
+        return error;
+    }
+
+    while (!s->buf.freeze_output && size > 0) {
+        ssize_t ret;
+        assert(s->buf.buffer_size == 0);
+
+        ret = write(s->fd, buf, size);
+        if (ret == -1) {
+            if (errno == EINTR) {
+                continue;
+            } else if (errno == EAGAIN) {
+                s->buf.freeze_output = true;
+            } else {
+                qemu_file_set_error(s->file, errno);
+            }
+            break;
+        }
+
+        len += ret;
+        buf += ret;
+        size -= ret;
+    }
+
+    if (size > 0) {
+        buffer_append(&s->buf, buf, size);
+        len += size;
+    }
+    return len;
+}
+
+int nonblock_pending_size(QEMUFileNonblock *s)
+{
+    return qemu_pending_size(s->file) + s->buf.buffer_size;
+}
+
+void nonblock_fflush(QEMUFileNonblock *s)
+{
+    s->buf.freeze_output = false;
+    nonblock_flush_buffer(s);
+    if (!s->buf.freeze_output) {
+        qemu_fflush(s->file);
+    }
+}
+
+void nonblock_wait_for_flush(QEMUFileNonblock *s)
+{
+    while (nonblock_pending_size(s) > 0) {
+        fd_set fds;
+        FD_ZERO(&fds);
+        FD_SET(s->fd, &fds);
+        select(s->fd + 1, NULL, &fds, NULL, NULL);
+
+        nonblock_fflush(s);
+    }
+}
+
+static int nonblock_close(void *opaque)
+{
+    QEMUFileNonblock *s = opaque;
+    nonblock_wait_for_flush(s);
+    buffer_destroy(&s->buf);
+    g_free(s);
+    return 0;
+}
+
+QEMUFileNonblock *qemu_fopen_nonblock(int fd)
+{
+    QEMUFileNonblock *s = g_malloc0(sizeof(*s));
+
+    s->fd = fd;
+    fcntl_setfl(fd, O_NONBLOCK);
+    s->file = qemu_fopen_ops(s, nonblock_put_buffer, NULL, nonblock_close,
+                             NULL, NULL, NULL);
+    return s;
+}
+
+/***************************************************************************
  * Buffered File
  */
 

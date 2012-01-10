@@ -24,6 +24,19 @@ struct QEMUBuffer {
 };
 typedef struct QEMUBuffer QEMUBuffer;
 
+struct QEMUFileNonblock {
+    int fd;
+    QEMUFile *file;
+
+    QEMUBuffer buf;
+};
+typedef struct QEMUFileNonblock QEMUFileNonblock;
+
+QEMUFileNonblock *qemu_fopen_nonblock(int fd);
+int nonblock_pending_size(QEMUFileNonblock *s);
+void nonblock_fflush(QEMUFileNonblock *s);
+void nonblock_wait_for_flush(QEMUFileNonblock *s);
+
 typedef ssize_t (BufferedPutFunc)(void *opaque, const void *data, size_t size);
 typedef void (BufferedPutReadyFunc)(void *opaque);
 typedef void (BufferedWaitForUnfreezeFunc)(void *opaque);
