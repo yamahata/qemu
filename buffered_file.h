@@ -16,6 +16,14 @@
 
 #include "hw/hw.h"
 
+struct QEMUBuffer {
+    uint8_t *buffer;
+    size_t buffer_size;
+    size_t buffer_capacity;
+    bool freeze_output;
+};
+typedef struct QEMUBuffer QEMUBuffer;
+
 typedef ssize_t (BufferedPutFunc)(void *opaque, const void *data, size_t size);
 typedef void (BufferedPutReadyFunc)(void *opaque);
 typedef void (BufferedWaitForUnfreezeFunc)(void *opaque);
