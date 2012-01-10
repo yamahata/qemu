@@ -68,6 +68,7 @@ QEMUFile *qemu_fopen_ops(void *opaque, QEMUFilePutBufferFunc *put_buffer,
 QEMUFile *qemu_fopen(const char *filename, const char *mode);
 QEMUFile *qemu_fdopen(int fd, const char *mode);
 QEMUFile *qemu_fopen_socket(int fd);
+QEMUFile *qemu_fopen_fd(int fd, const char *mode);
 QEMUFile *qemu_popen(FILE *popen_file, const char *mode);
 QEMUFile *qemu_popen_cmd(const char *command, const char *mode);
 int qemu_file_fd(QEMUFile *f);
