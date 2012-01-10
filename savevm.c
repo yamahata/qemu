@@ -207,6 +207,35 @@ static int socket_get_buffer(void *opaque, uint8_t *buf, int64_t pos, int size)
     return len;
 }
 
+static int fd_get_buffer(void *opaque, uint8_t *buf, int64_t pos, int size)
+{
+    QEMUFileFD *s = opaque;
+    ssize_t len = 0;
+
+    while (size > 0) {
+        ssize_t ret = read(s->file->fd, buf, size);
+        if (ret == -1) {
+            if (errno == EINTR) {
+                continue;
+            }
+            if (len == 0) {
+                len = -errno;
+            }
+            break;
+        }
+
+        if (ret == 0) {
+            /* the write end of the pipe is closed */
+            break;
+        }
+        len += ret;
+        buf += ret;
+        size -= ret;
+    }
+
+    return len;
+}
+
 static int fd_close(void *opaque)
 {
     QEMUFileFD *s = opaque;
@@ -329,6 +358,17 @@ QEMUFile *qemu_fopen_socket(int fd)
 
     s->file = qemu_fopen_ops(s, NULL, socket_get_buffer, fd_close,
 			     NULL, NULL, NULL);
+    s->file->fd = fd;
+    return s->file;
+}
+
+QEMUFile *qemu_fopen_fd(int fd)
+{
+    QEMUFileFD *s = g_malloc0(sizeof(*s));
+
+    fcntl_setfl(fd, O_NONBLOCK);
+    s->file = qemu_fopen_ops(s, NULL, fd_get_buffer, fd_close,
+                             NULL, NULL, NULL);
     s->file->fd = fd;
     return s->file;
 }
