@@ -187,14 +187,14 @@ typedef struct QEMUFileStdio
     QEMUFile *file;
 } QEMUFileStdio;
 
-typedef struct QEMUFileSocket
+typedef struct QEMUFileFD
 {
     QEMUFile *file;
-} QEMUFileSocket;
+} QEMUFileFD;
 
 static int socket_get_buffer(void *opaque, uint8_t *buf, int64_t pos, int size)
 {
-    QEMUFileSocket *s = opaque;
+    QEMUFileFD *s = opaque;
     ssize_t len;
 
     do {
@@ -207,9 +207,9 @@ static int socket_get_buffer(void *opaque, uint8_t *buf, int64_t pos, int size)
     return len;
 }
 
-static int socket_close(void *opaque)
+static int fd_close(void *opaque)
 {
-    QEMUFileSocket *s = opaque;
+    QEMUFileFD *s = opaque;
     g_free(s);
     return 0;
 }
@@ -325,9 +325,9 @@ fail:
 
 QEMUFile *qemu_fopen_socket(int fd)
 {
-    QEMUFileSocket *s = g_malloc0(sizeof(QEMUFileSocket));
+    QEMUFileFD *s = g_malloc0(sizeof(QEMUFileFD));
 
-    s->file = qemu_fopen_ops(s, NULL, socket_get_buffer, socket_close, 
+    s->file = qemu_fopen_ops(s, NULL, socket_get_buffer, fd_close,
 			     NULL, NULL, NULL);
     s->file->fd = fd;
     return s->file;
