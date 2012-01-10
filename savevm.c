@@ -1697,8 +1697,10 @@ int qemu_savevm_state_iterate(QEMUFile *f)
     return ret;
 }
 
-int qemu_savevm_state_complete(QEMUFile *f)
+int qemu_savevm_state_complete(QEMUFile *f, bool postcopy)
 {
+    QEMUFile *orig_f = NULL;
+    QEMUFileBuf *buf_file = NULL;
     SaveStateEntry *se;
     int ret;
 
@@ -1716,6 +1718,12 @@ int qemu_savevm_state_complete(QEMUFile *f)
         if (ret < 0) {
             return ret;
         }
+    }
+
+    if (postcopy) {
+        orig_f = f;
+        buf_file = qemu_fopen_buf_write();
+        f = buf_file->file;
     }
 
     QTAILQ_FOREACH(se, &savevm_handlers, entry) {
@@ -1740,6 +1748,16 @@ int qemu_savevm_state_complete(QEMUFile *f)
     }
 
     qemu_put_byte(f, QEMU_VM_EOF);
+
+    if (postcopy) {
+        qemu_fflush(f);
+        qemu_put_byte(orig_f, QEMU_VM_POSTCOPY);
+        qemu_put_be32(orig_f, buf_file->buf.buffer_size);
+        qemu_put_buffer(orig_f,
+                        buf_file->buf.buffer, buf_file->buf.buffer_size);
+        qemu_fclose(f);
+        f = orig_f;
+    }
 
     return qemu_file_get_error(f);
 }
@@ -1780,7 +1798,7 @@ static int qemu_savevm_state(QEMUFile *f)
             goto out;
     } while (ret == 0);
 
-    ret = qemu_savevm_state_complete(f);
+    ret = qemu_savevm_state_complete(f, params.postcopy);
 
 out:
     if (ret == 0) {

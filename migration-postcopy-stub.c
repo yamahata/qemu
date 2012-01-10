@@ -24,6 +24,28 @@
 #include "sysemu.h"
 #include "migration.h"
 
+int postcopy_outgoing_create_read_socket(MigrationState *s)
+{
+    return -ENOSYS;
+}
+
+int postcopy_outgoing_ram_save_live(Monitor *mon,
+                                    QEMUFile *f, int stage, void *opaque)
+{
+    return -ENOSYS;
+}
+
+void *postcopy_outgoing_begin(MigrationState *ms)
+{
+    return NULL;
+}
+
+int postcopy_outgoing_ram_save_background(Monitor *mon, QEMUFile *f,
+                                          void *postcopy)
+{
+    return -ENOSYS;
+}
+
 int postcopy_incoming_init(const char *incoming, bool incoming_postcopy)
 {
     return -ENOSYS;
