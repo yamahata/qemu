@@ -207,6 +207,19 @@ static int socket_get_buffer(void *opaque, uint8_t *buf, int64_t pos, int size)
     return len;
 }
 
+static int fd_get_buffer(void *opaque, uint8_t *buf, int64_t pos, int size)
+{
+    QEMUFileFD *s = opaque;
+    return qemu_read_full(s->file->fd, buf, size);
+}
+
+static int fd_put_buffer(void *opaque,
+                         const uint8_t *buf, int64_t pos, int size)
+{
+    QEMUFileFD *s = opaque;
+    return qemu_write_full(s->file->fd, buf, size);
+}
+
 static int fd_close(void *opaque)
 {
     QEMUFileFD *s = opaque;
@@ -329,6 +342,28 @@ QEMUFile *qemu_fopen_socket(int fd)
 
     s->file = qemu_fopen_ops(s, NULL, socket_get_buffer, fd_close,
 			     NULL, NULL, NULL);
+    s->file->fd = fd;
+    return s->file;
+}
+
+QEMUFile *qemu_fopen_fd(int fd, const char *mode)
+{
+    QEMUFileFD *s;
+
+    if (mode == NULL || (mode[0] != 'r' && mode[0] != 'w') || mode[1] != 0) {
+        fprintf(stderr, "qemu_fopen_fd: Argument validity check failed\n");
+        return NULL;
+    }
+
+    s = g_malloc0(sizeof(*s));
+    if (mode[0] == 'r') {
+        s->file = qemu_fopen_ops(s, NULL, fd_get_buffer, fd_close,
+                                 NULL, NULL, NULL);
+    } else {
+        s->file = qemu_fopen_ops(s, fd_put_buffer, NULL, fd_close,
+                                 NULL, NULL, NULL);
+    }
+
     s->file->fd = fd;
     return s->file;
 }
