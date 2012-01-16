@@ -70,7 +70,6 @@ QEMUFile *qemu_fdopen(int fd, const char *mode);
 QEMUFile *qemu_fopen_socket(int fd);
 QEMUFile *qemu_popen(FILE *popen_file, const char *mode);
 QEMUFile *qemu_popen_cmd(const char *command, const char *mode);
-int qemu_stdio_fd(QEMUFile *f);
 int qemu_file_fd(QEMUFile *f);
 void qemu_fflush(QEMUFile *f);
 void qemu_buffered_file_drain(QEMUFile *f);
