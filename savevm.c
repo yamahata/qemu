@@ -189,7 +189,6 @@ typedef struct QEMUFileStdio
 
 typedef struct QEMUFileSocket
 {
-    int fd;
     QEMUFile *file;
 } QEMUFileSocket;
 
@@ -199,7 +198,7 @@ static int socket_get_buffer(void *opaque, uint8_t *buf, int64_t pos, int size)
     ssize_t len;
 
     do {
-        len = qemu_recv(s->fd, buf, size, 0);
+        len = qemu_recv(s->file->fd, buf, size, 0);
     } while (len == -1 && socket_error() == EINTR);
 
     if (len == -1)
@@ -328,7 +327,6 @@ QEMUFile *qemu_fopen_socket(int fd)
 {
     QEMUFileSocket *s = g_malloc0(sizeof(QEMUFileSocket));
 
-    s->fd = fd;
     s->file = qemu_fopen_ops(s, NULL, socket_get_buffer, socket_close, 
 			     NULL, NULL, NULL);
     s->file->fd = fd;
