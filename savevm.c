@@ -178,6 +178,7 @@ struct QEMUFile {
     uint8_t buf[IO_BUF_SIZE];
 
     int last_error;
+    int fd;     /* -1 means fd isn't associated */
 };
 
 typedef struct QEMUFileStdio
@@ -276,6 +277,7 @@ QEMUFile *qemu_popen(FILE *stdio_file, const char *mode)
         s->file = qemu_fopen_ops(s, stdio_put_buffer, NULL, stdio_pclose, 
 				 NULL, NULL, NULL);
     }
+    s->file->fd = fileno(stdio_file);
     return s->file;
 }
 
@@ -291,6 +293,7 @@ QEMUFile *qemu_popen_cmd(const char *command, const char *mode)
     return qemu_popen(popen_file, mode);
 }
 
+/* TODO: replace this with qemu_file_fd() */
 int qemu_stdio_fd(QEMUFile *f)
 {
     QEMUFileStdio *p;
@@ -325,6 +328,7 @@ QEMUFile *qemu_fdopen(int fd, const char *mode)
         s->file = qemu_fopen_ops(s, stdio_put_buffer, NULL, stdio_fclose, 
 				 NULL, NULL, NULL);
     }
+    s->file->fd = fd;
     return s->file;
 
 fail:
@@ -339,6 +343,7 @@ QEMUFile *qemu_fopen_socket(int fd)
     s->fd = fd;
     s->file = qemu_fopen_ops(s, NULL, socket_get_buffer, socket_close, 
 			     NULL, NULL, NULL);
+    s->file->fd = fd;
     return s->file;
 }
 
@@ -381,6 +386,7 @@ QEMUFile *qemu_fopen(const char *filename, const char *mode)
         s->file = qemu_fopen_ops(s, NULL, file_get_buffer, stdio_fclose, 
 			       NULL, NULL, NULL);
     }
+    s->file->fd = fileno(s->stdio_file);
     return s->file;
 fail:
     g_free(s);
@@ -431,8 +437,14 @@ QEMUFile *qemu_fopen_ops(void *opaque, QEMUFilePutBufferFunc *put_buffer,
     f->set_rate_limit = set_rate_limit;
     f->get_rate_limit = get_rate_limit;
     f->is_write = 0;
+    f->fd = -1;
 
     return f;
+}
+
+int qemu_file_fd(QEMUFile *f)
+{
+    return f->fd;
 }
 
 int qemu_file_get_error(QEMUFile *f)
