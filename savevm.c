@@ -293,18 +293,6 @@ QEMUFile *qemu_popen_cmd(const char *command, const char *mode)
     return qemu_popen(popen_file, mode);
 }
 
-/* TODO: replace this with qemu_file_fd() */
-int qemu_stdio_fd(QEMUFile *f)
-{
-    QEMUFileStdio *p;
-    int fd;
-
-    p = (QEMUFileStdio *)f->opaque;
-    fd = fileno(p->stdio_file);
-
-    return fd;
-}
-
 QEMUFile *qemu_fdopen(int fd, const char *mode)
 {
     QEMUFileStdio *s;
