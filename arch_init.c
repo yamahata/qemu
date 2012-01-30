@@ -155,8 +155,9 @@ static int is_dup_page(uint8_t *page)
 }
 
 static RAMBlock *last_block_sent = NULL;
+static uint64_t bytes_transferred;
 
-int ram_save_page(QEMUFile *f, RAMBlock *block, ram_addr_t offset)
+static int ram_save_page_int(QEMUFile *f, RAMBlock *block, ram_addr_t offset)
 {
     MemoryRegion *mr = block->mr;
     uint8_t *p;
@@ -190,6 +191,13 @@ int ram_save_page(QEMUFile *f, RAMBlock *block, ram_addr_t offset)
     }
     qemu_put_buffer(f, p, TARGET_PAGE_SIZE);
     return TARGET_PAGE_SIZE;
+}
+
+int ram_save_page(QEMUFile *f, RAMBlock *block, ram_addr_t offset)
+{
+    int bytes_sent = ram_save_page_int(f, block, offset);
+    bytes_transferred += bytes_sent;
+    return bytes_sent;
 }
 
 static RAMBlock *last_block;
@@ -227,8 +235,6 @@ int ram_save_block(QEMUFile *f)
 
     return bytes_sent;
 }
-
-static uint64_t bytes_transferred;
 
 static ram_addr_t ram_save_remaining(void)
 {
@@ -357,11 +363,7 @@ int ram_save_live(QEMUFile *f, int stage, void *opaque)
     bwidth = qemu_get_clock_ns(rt_clock);
 
     while ((ret = qemu_file_rate_limit(f)) == 0) {
-        int bytes_sent;
-
-        bytes_sent = ram_save_block(f);
-        bytes_transferred += bytes_sent;
-        if (bytes_sent == 0) { /* no more blocks */
+        if (ram_save_block(f) == 0) { /* no more blocks */
             break;
         }
     }
@@ -381,11 +383,9 @@ int ram_save_live(QEMUFile *f, int stage, void *opaque)
 
     /* try transferring iterative blocks of memory */
     if (stage == 3) {
-        int bytes_sent;
-
         /* flush all remaining blocks regardless of rate limiting */
-        while ((bytes_sent = ram_save_block(f)) != 0) {
-            bytes_transferred += bytes_sent;
+        while (ram_save_block(f) != 0) {
+            /* nothing */
         }
         memory_global_dirty_log_stop();
     }
