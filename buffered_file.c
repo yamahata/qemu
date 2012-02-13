@@ -106,6 +106,56 @@ static void buffer_flush(QEMUBuffer *buf, QEMUFile *file,
 
 
 /***************************************************************************
+ * read/write to buffer on memory
+ */
+
+static int buf_close(void *opaque)
+{
+    QEMUFileBuf *s = opaque;
+    buffer_destroy(&s->buf);
+    g_free(s);
+    return 0;
+}
+
+static int buf_put_buffer(void *opaque,
+                          const uint8_t *buf, int64_t pos, int size)
+{
+    QEMUFileBuf *s = opaque;
+    buffer_append(&s->buf, buf, size);
+    return size;
+}
+
+QEMUFileBuf *qemu_fopen_buf_write(void)
+{
+    QEMUFileBuf *s = g_malloc0(sizeof(*s));
+
+    s->file = qemu_fopen_ops(s,  buf_put_buffer, NULL, buf_close,
+                             NULL, NULL, NULL);
+    return s;
+}
+
+static int buf_get_buffer(void *opaque, uint8_t *buf, int64_t pos, int size)
+{
+    QEMUFileBuf *s = opaque;
+    ssize_t len = MIN(size, s->buf.buffer_capacity - s->buf.buffer_size);
+    memcpy(buf, s->buf.buffer + s->buf.buffer_size, len);
+    s->buf.buffer_size += len;
+    return len;
+}
+
+/* This get the ownership of buf. */
+QEMUFile *qemu_fopen_buf_read(uint8_t *buf, size_t size)
+{
+    QEMUFileBuf *s = g_malloc0(sizeof(*s));
+    s->buf.buffer = buf;
+    s->buf.buffer_size = 0; /* this is used as index to read */
+    s->buf.buffer_capacity = size;
+    s->file = qemu_fopen_ops(s, NULL, buf_get_buffer, buf_close,
+                             NULL, NULL, NULL);
+    return s->file;
+}
+
+/***************************************************************************
  * Nonblocking write only file
  */
 static ssize_t nonblock_flush_buffer_putbuf(void *opaque,
