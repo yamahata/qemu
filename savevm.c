@@ -1614,6 +1614,10 @@ static void vmstate_save(QEMUFile *f, SaveStateEntry *se)
 #define QEMU_VM_SECTION_FULL         0x04
 #define QEMU_VM_SUBSECTION           0x05
 
+/* This section is used by postcopy to tell postcopy enabled session.
+   If the destination side doesn't know, it sees unknown section and abort. */
+#define QEMU_VM_POSTCOPY             0x10
+
 bool qemu_savevm_state_blocked(Error **errp)
 {
     SaveStateEntry *se;
