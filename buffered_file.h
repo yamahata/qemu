@@ -24,6 +24,16 @@ struct QEMUBuffer {
 };
 typedef struct QEMUBuffer QEMUBuffer;
 
+struct QEMUFileBuf {
+    QEMUFile *file;
+    QEMUBuffer buf;
+};
+typedef struct QEMUFileBuf QEMUFileBuf;
+
+QEMUFileBuf *qemu_fopen_buf_write(void);
+/* This get the ownership of buf. */
+QEMUFile *qemu_fopen_buf_read(uint8_t *buf, size_t size);
+
 struct QEMUFileNonblock {
     int fd;
     QEMUFile *file;
