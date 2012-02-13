@@ -1614,6 +1614,7 @@ static void vmstate_save(QEMUFile *f, SaveStateEntry *se)
 #define QEMU_VM_SECTION_END          0x03
 #define QEMU_VM_SECTION_FULL         0x04
 #define QEMU_VM_SUBSECTION           0x05
+#define QEMU_VM_POSTCOPY             0x10
 
 bool qemu_savevm_state_blocked(Error **errp)
 {
