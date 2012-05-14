@@ -347,6 +347,37 @@ int postcopy_outgoing_ram_save_complete(QEMUFile *f, void *opaque)
     return 0;
 }
 
+static void postcopy_outgoing_ram_save_page(PostcopyOutgoingState *s,
+                                            uint64_t pgoffset, bool *written,
+                                            bool forward,
+                                            int prefault_pgoffset)
+{
+    ram_addr_t offset;
+    int ret;
+
+    if (forward) {
+        pgoffset += prefault_pgoffset;
+    } else {
+        if (pgoffset < prefault_pgoffset) {
+            return;
+        }
+        pgoffset -= prefault_pgoffset;
+    }
+
+    offset = pgoffset << TARGET_PAGE_BITS;
+    if (offset >= s->last_block_read->length) {
+        assert(forward);
+        assert(prefault_pgoffset > 0);
+        return;
+    }
+
+    ret = ram_save_page(s->mig_buffered_write, s->last_block_read, offset,
+                        false);
+    if (ret > 0) {
+        *written = true;
+    }
+}
+
 /*
  * return value
  *   0: continue postcopy mode
@@ -358,6 +389,7 @@ static int postcopy_outgoing_handle_req(PostcopyOutgoingState *s,
                                         bool *written)
 {
     int i;
+    uint64_t j;
     RAMBlock *block;
 
     DPRINTF("cmd %d state %d\n", req->cmd, s->state);
@@ -390,11 +422,26 @@ static int postcopy_outgoing_handle_req(PostcopyOutgoingState *s,
             break;
         }
         for (i = 0; i < req->nr; i++) {
-            DPRINTF("offs[%d] 0x%"PRIx64"\n", i, req->pgoffs[i]);
-            int ret = ram_save_page(s->mig_buffered_write, s->last_block_read,
-                                    req->pgoffs[i] << TARGET_PAGE_BITS, false);
-            if (ret > 0) {
-                *written = true;
+            DPRINTF("pgoffs[%d] 0x%"PRIx64"\n", i, req->pgoffs[i]);
+            postcopy_outgoing_ram_save_page(s, req->pgoffs[i], written,
+                                            true, 0);
+        }
+        /* forward prefault */
+        for (j = 1; j <= s->ms->params.prefault_forward; j++) {
+            for (i = 0; i < req->nr; i++) {
+                DPRINTF("pgoffs[%d] + 0x%"PRIx64" 0x%"PRIx64"\n",
+                        i, j, req->pgoffs[i] + j);
+                postcopy_outgoing_ram_save_page(s, req->pgoffs[i], written,
+                                                true, j);
+            }
+        }
+        /* backward prefault */
+        for (j = 1; j <= s->ms->params.prefault_backward; j++) {
+            for (i = 0; i < req->nr; i++) {
+                DPRINTF("pgoffs[%d] - 0x%"PRIx64" 0x%"PRIx64"\n",
+                        i, j, req->pgoffs[i] - j);
+                postcopy_outgoing_ram_save_page(s, req->pgoffs[i], written,
+                                                false, j);
             }
         }
         break;
