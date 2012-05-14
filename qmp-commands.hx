@@ -611,7 +611,7 @@ EQMP
 
     {
         .name       = "migrate",
-        .args_type  = "detach:-d,blk:-b,inc:-i,uri:s",
+        .args_type  = "detach:-d,blk:-b,inc:-i,uri:s,forward:i?,bacword:i?",
         .mhandler.cmd_new = qmp_marshal_input_migrate,
     },
 
@@ -626,6 +626,9 @@ Arguments:
 - "blk": block migration, full disk copy (json-bool, optional)
 - "inc": incremental disk copy (json-bool, optional)
 - "uri": Destination URI (json-string)
+- "precopy_count": loop count of precopy phase(json-int, optional)
+- "forward": size of forward prefault when postcopy(json-int, optional)
+- "backward": size of backward prefault when postcopy(json-int, optional)
 
 Example:
 
