@@ -798,26 +798,31 @@ ETEXI
 
     {
         .name       = "migrate",
-        .args_type  = "detach:-d,blk:-b,inc:-i,postcopy:-p,nobg:-n,uri:s",
-        .params     = "[-d] [-b] [-i] [-p [-n]] uri",
+        .args_type  = "detach:-d,blk:-b,inc:-i,postcopy:-p,nobg:-n,uri:s,"
+	              "forward:i?,backward:i?",
+        .params     = "[-d] [-b] [-i] [-p [-n] uri [forward] [backword]",
         .help       = "migrate to URI (using -d to not wait for completion)"
 		      "\n\t\t\t -b for migration without shared storage with"
 		      " full copy of disk\n\t\t\t -i for migration without "
 		      "shared storage with incremental copy of disk "
 		      "(base image shared between src and destination)"
 		      "\n\t\t\t-p for migration with postcopy mode enabled"
-		      "\n\t\t\t-n for no background transfer of postcopy mode",
+		      "\n\t\t\t-n for no background transfer of postcopy mode"
+		      "\n\t\t\tforward: the number of pages to "
+		      "forward-prefault when postcopy (default 0)"
+		      "\n\t\t\tbackward: the number of pages to "
+		      "backward-prefault when postcopy (default 0)",
         .mhandler.cmd = hmp_migrate,
     },
 
 
 STEXI
-@item migrate [-d] [-b] [-i] [-p [-n]] @var{uri}
+@item migrate [-d] [-b] [-i] [-p [-n]] @var{uri} @var{forward} @var{backward}
 @findex migrate
 Migrate to @var{uri} (using -d to not wait for completion).
 	-b for migration with full copy of disk
 	-i for migration with incremental copy of disk (base image is shared)
-	-p for migration with postcopy mode enabled
+	-p for migration with postcopy mode enabled (forward/backward is prefault size when postcopy)
 	-n for migration with postcopy mode enabled without background transfer
 ETEXI
 
