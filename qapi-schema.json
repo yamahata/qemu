@@ -2405,7 +2405,8 @@
 # Since: 0.14.0
 ##
 { 'command': 'migrate',
-  'data': {'uri': 'str', '*blk': 'bool', '*inc': 'bool', '*detach': 'bool' } }
+  'data': {'uri': 'str', '*blk': 'bool', '*inc': 'bool', '*detach': 'bool',
+           '*forward': 'int', '*backward': 'int' } }
 
 # @xen-save-devices-state:
 #
