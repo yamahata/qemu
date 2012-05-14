@@ -359,16 +359,45 @@ uint64_t postcopy_outgoing_ram_save_pending(QEMUFile *f, void *opaque,
     return 0;
 }
 
+static void postcopy_outgoing_ram_save_page(QEMUFile *f,
+                                            PostcopyOutgoingState *s,
+                                            uint64_t pgoffset, bool forward,
+                                            int prefault_pgoffset)
+{
+    ram_addr_t offset;
+
+    if (forward) {
+        pgoffset += prefault_pgoffset;
+    } else {
+        if (pgoffset < prefault_pgoffset) {
+            return;
+        }
+        pgoffset -= prefault_pgoffset;
+    }
+
+    offset = pgoffset << TARGET_PAGE_BITS;
+    if (offset >= s->last_block_read->length) {
+        assert(forward);
+        assert(prefault_pgoffset > 0);
+        return;
+    }
+
+    ram_save_page(f, s->last_block_read, offset);
+}
+
 /*
  * return value
  *   0: continue postcopy mode
  * > 0: completed postcopy mode.
  * < 0: error
  */
-static int postcopy_outgoing_handle_req(QEMUFile *f, PostcopyOutgoingState *s,
+static int postcopy_outgoing_handle_req(MigrationState *ms,
                                         const QEMUUMemReq *req)
 {
+    PostcopyOutgoingState *s = ms->postcopy;
+    QEMUFile *f = ms->file;
     int i;
+    uint64_t j;
     RAMBlock *block;
 
     DPRINTF("cmd %d state %d\n", req->cmd, s->state);
@@ -400,9 +429,26 @@ static int postcopy_outgoing_handle_req(QEMUFile *f, PostcopyOutgoingState *s,
             break;
         }
         for (i = 0; i < req->nr; i++) {
-            DPRINTF("offs[%d] 0x%"PRIx64"\n", i, req->pgoffs[i]);
-            ram_save_page(f, s->last_block_read,
-                          req->pgoffs[i] << TARGET_PAGE_BITS);
+            DPRINTF("pgoffs[%d] 0x%"PRIx64"\n", i, req->pgoffs[i]);
+            postcopy_outgoing_ram_save_page(f, s, req->pgoffs[i], true, 0);
+        }
+        /* forward prefault */
+        for (j = 1; j <= ms->params.prefault_forward; j++) {
+            for (i = 0; i < req->nr; i++) {
+                DPRINTF("pgoffs[%d] + 0x%"PRIx64" 0x%"PRIx64"\n",
+                        i, j, req->pgoffs[i] + j);
+                postcopy_outgoing_ram_save_page(f, s, req->pgoffs[i],
+                                                true, j);
+            }
+        }
+        /* backward prefault */
+        for (j = 1; j <= ms->params.prefault_backward; j++) {
+            for (i = 0; i < req->nr; i++) {
+                DPRINTF("pgoffs[%d] - 0x%"PRIx64" 0x%"PRIx64"\n",
+                        i, j, req->pgoffs[i] - j);
+                postcopy_outgoing_ram_save_page(f, s, req->pgoffs[i],
+                                                false, j);
+            }
         }
         break;
     default:
@@ -437,7 +483,7 @@ static void postcopy_outgoing_recv_handler(MigrationState *ms)
 
         /* Even when s->state == PO_STATE_ALL_PAGES_SENT,
            some request can be received like QEMU_UMEM_REQ_EOC */
-        ret = postcopy_outgoing_handle_req(file_write, s, &req);
+        ret = postcopy_outgoing_handle_req(ms, &req);
         postcopy_outgoing_free_req(&req);
     } while (ret == 0);
     qemu_fflush(file_write);
