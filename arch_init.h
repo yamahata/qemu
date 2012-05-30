@@ -49,6 +49,7 @@ CpuDefinitionInfoList GCC_WEAK_DECL *arch_query_cpu_definitions(Error **errp);
 int ram_load_page(QEMUFile *f, void *host, int flags);
 
 #if defined(NEED_CPU_H) && !defined(CONFIG_USER_ONLY)
+void ram_save_set_last_block(RAMBlock *block, ram_addr_t offset);
 bool ram_save_page(QEMUFile *f, RAMBlock *block, ram_addr_t offset,
                    bool last_stage);
 RAMBlock *ram_find_block(const char *id, uint8_t len);
