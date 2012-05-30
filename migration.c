@@ -460,7 +460,6 @@ static MigrationState *migrate_init(const MigrationParams *params)
            sizeof(enabled_capabilities));
     s->xbzrle_cache_size = xbzrle_cache_size;
 
-    s->bandwidth_limit = bandwidth_limit;
     s->state = MIG_STATE_SETUP;
     s->total_time = qemu_get_clock_ms(rt_clock);
 
