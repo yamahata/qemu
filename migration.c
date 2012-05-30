@@ -539,6 +539,16 @@ bool migration_postcopy_outgoing_no_background(void)
     return s->enabled_capabilities[MIGRATION_CAPABILITY_POSTCOPY_NO_BACKGROUND];
 }
 
+bool migration_postcopy_outgoing_move_background(void)
+{
+    MigrationState *s;
+
+    s = migrate_get_current();
+
+    return s->enabled_capabilities[
+        MIGRATION_CAPABILITY_POSTCOPY_MOVE_BACKGROUND];
+}
+
 bool migrate_rdma_pin_all(void)
 {
     MigrationState *s;
