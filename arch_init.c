@@ -468,6 +468,12 @@ void ram_save_bulk_stage_done(void)
     ram_bulk_stage = false;
 }
 
+void ram_save_set_last_seen_block(RAMBlock *block, ram_addr_t offset)
+{
+    last_seen_block = block;
+    last_offset = offset;
+}
+
 void ram_save_page_reset(void)
 {
     last_sent_block = NULL;
@@ -560,8 +566,7 @@ bool ram_save_block(QEMUFile *f, bool disable_xbzrle, bool last_stage)
             break;
         }
     }
-    last_seen_block = block;
-    last_offset = offset;
+    ram_save_set_last_seen_block(block, offset);
 
     return wrote;
 }
