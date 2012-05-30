@@ -203,6 +203,12 @@ int ram_save_page(QEMUFile *f, RAMBlock *block, ram_addr_t offset)
 static RAMBlock *last_block;
 static ram_addr_t last_offset;
 
+void ram_save_set_last_block(RAMBlock *block, ram_addr_t offset)
+{
+    last_block = block;
+    last_offset = offset;
+}
+
 int ram_save_block(QEMUFile *f)
 {
     RAMBlock *block = last_block;
@@ -230,9 +236,7 @@ int ram_save_block(QEMUFile *f)
         }
     } while (block != last_block || offset != last_offset);
 
-    last_block = block;
-    last_offset = offset;
-
+    ram_save_set_last_block(block, offset);
     return bytes_sent;
 }
 
@@ -349,8 +353,7 @@ int ram_save_live(QEMUFile *f, int stage, void *opaque)
     if (stage == 1) {
         bytes_transferred = 0;
         last_block_sent = NULL;
-        last_block = NULL;
-        last_offset = 0;
+        ram_save_set_last_block(NULL, 0);
         sort_ram_list();
 
         /* Make sure all dirty bits are set */
