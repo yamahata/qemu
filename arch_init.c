@@ -416,6 +416,12 @@ static void migration_bitmap_sync(void)
 
 static uint64_t bytes_transferred;
 
+void ram_save_set_last_block(RAMBlock *block, ram_addr_t offset)
+{
+    last_block = block;
+    last_offset = offset;
+}
+
 /*
  * ram_save_page: Writes a page of memory to the stream f
  *
@@ -496,9 +502,7 @@ bool ram_save_block(QEMUFile *f, bool last_stage)
         }
     } while (block != last_block || offset != last_offset);
 
-    last_block = block;
-    last_offset = offset;
-
+    ram_save_set_last_block(block, offset);
     return wrote;
 }
 
