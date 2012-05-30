@@ -367,7 +367,6 @@ static MigrationState *migrate_init(int blk, int inc)
     int64_t bandwidth_limit = s->bandwidth_limit;
 
     memset(s, 0, sizeof(*s));
-    s->bandwidth_limit = bandwidth_limit;
     s->blk = blk;
     s->shared = inc;
 
