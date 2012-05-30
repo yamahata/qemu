@@ -2131,6 +2131,7 @@ static int qemu_savevm_state(QEMUFile *f)
         .blk = 0,
         .shared = 0,
         .postcopy = 0,
+        .movebg = 0,
         .nobg = 0,
     };
 

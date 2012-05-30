@@ -441,6 +441,14 @@ static int postcopy_outgoing_handle_req(MigrationState *ms,
                                                 true, j);
             }
         }
+        if (ms->params.movebg) {
+            ram_addr_t last_offset =
+                (req->pgoffs[req->nr - 1] + ms->params.prefault_forward) <<
+                TARGET_PAGE_BITS;
+            last_offset = MIN(last_offset,
+                              s->last_block_read->length - TARGET_PAGE_SIZE);
+            ram_save_set_last_seen_block(s->last_block_read, last_offset);
+        }
         /* backward prefault */
         for (j = 1; j <= ms->params.prefault_backward; j++) {
             for (i = 0; i < req->nr; i++) {
