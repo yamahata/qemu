@@ -26,6 +26,7 @@ struct MigrationParams {
     bool shared;
     bool postcopy;
     bool nobg;
+    bool movebg;
     int64_t prefault_forward;
     int64_t prefault_backward;
 };

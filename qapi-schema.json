@@ -2095,7 +2095,7 @@
 ##
 { 'command': 'migrate',
   'data': {'uri': 'str', '*blk': 'bool', '*inc': 'bool', '*detach': 'bool' ,
-           '*postcopy': 'bool', '*nobg': 'bool',
+           '*postcopy': 'bool', '*movebg': 'bool', '*nobg': 'bool',
            '*forward': 'int', '*backward': 'int'} }
 
 # @xen-save-devices-state:
