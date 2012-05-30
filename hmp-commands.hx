@@ -798,15 +798,16 @@ ETEXI
 
     {
         .name       = "migrate",
-        .args_type  = "detach:-d,blk:-b,inc:-i,postcopy:-p,nobg:-n,uri:s,"
+        .args_type  = "detach:-d,blk:-b,inc:-i,postcopy:-p,movebg:-m,nobg:-n,uri:s,"
 	              "forward:i?,backward:i?",
-        .params     = "[-d] [-b] [-i] [-p [-n] uri [forward] [backword]",
+        .params     = "[-d] [-b] [-i] [-p [-n] [-m] uri [forward] [backword]",
         .help       = "migrate to URI (using -d to not wait for completion)"
 		      "\n\t\t\t -b for migration without shared storage with"
 		      " full copy of disk\n\t\t\t -i for migration without "
 		      "shared storage with incremental copy of disk "
 		      "(base image shared between src and destination)"
 		      "\n\t\t\t-p for migration with postcopy mode enabled"
+		      "\n\t\t\t-m for move background transfer of postcopy mode"
 		      "\n\t\t\t-n for no background transfer of postcopy mode"
 		      "\n\t\t\tforward: the number of pages to "
 		      "forward-prefault when postcopy (default 0)"
