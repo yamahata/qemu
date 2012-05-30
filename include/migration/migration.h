@@ -151,6 +151,7 @@ void migrate_del_blocker(Error *reason);
 
 bool migration_postcopy_outgoing(void);
 bool migration_postcopy_outgoing_no_background(void);
+bool migration_postcopy_outgoing_move_background(void);
 
 bool migrate_rdma_pin_all(void);
 
