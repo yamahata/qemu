@@ -285,6 +285,7 @@ static void migrate_fd_put_ready(void *opaque)
             }
             s->substate = MIG_SUBSTATE_POSTCOPY;
             s->postcopy = postcopy_outgoing_begin(s);
+            qemu_buffered_file_ready(s->file);
             return;
         }
 
