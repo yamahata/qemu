@@ -497,3 +497,12 @@ void qemu_buffered_file_drain_buffer(void *buffered_file)
 {
     buffered_drain(buffered_file);
 }
+
+void qemu_buffered_file_ready_buffer(void *buffered_file)
+{
+    QEMUFileBuffered *s = buffered_file;
+    s->bytes_xfer = 0;
+    if (!s->buf.freeze_output) {
+        s->put_ready(s);
+    }
+}
