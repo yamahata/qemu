@@ -293,3 +293,12 @@ void qemu_buffered_file_drain_buffer(void *buffered_file)
     buffered_drain(s);
     s->no_limit = false;
 }
+
+void qemu_buffered_file_ready_buffer(void *buffered_file)
+{
+    QEMUFileBuffered *s = buffered_file;
+    s->bytes_xfer = 0;
+    if (!s->freeze_output) {
+        migrate_fd_put_ready(s->migration_state);
+    }
+}

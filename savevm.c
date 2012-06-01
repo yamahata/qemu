@@ -566,6 +566,11 @@ void qemu_buffered_file_drain(QEMUFile *f)
     qemu_buffered_file_drain_buffer(f->opaque);
 }
 
+void qemu_buffered_file_ready(QEMUFile *f)
+{
+    qemu_buffered_file_ready_buffer(f->opaque);
+}
+
 static void qemu_fill_buffer(QEMUFile *f)
 {
     int len;
