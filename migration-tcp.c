@@ -62,12 +62,19 @@ static void tcp_wait_for_connect(int fd, void *opaque)
         s->fd = -1;
         migrate_fd_error(s);
     } else {
+        int val;
         DPRINTF("migrate connect success\n");
         s->fd = fd;
         if (postcopy_outgoing_create_read_socket(s) < 0) {
             migrate_fd_error(s);
         } else {
             migrate_fd_connect(s);
+        }
+
+        val = 1;
+        if (setsockopt(s->fd, IPPROTO_TCP, TCP_NODELAY,
+                       &val, sizeof(val)) < 0) {
+            abort();
         }
     }
 }
@@ -96,6 +103,7 @@ static void tcp_accept_incoming_migration(void *opaque)
     int s = (intptr_t)opaque;
     QEMUFile *f;
     int c;
+    int val;
 
     do {
         c = qemu_accept(s, (struct sockaddr *)&addr, &addrlen);
@@ -108,6 +116,10 @@ static void tcp_accept_incoming_migration(void *opaque)
         goto out2;
     }
 
+    val = 1;
+    if (setsockopt(c, IPPROTO_TCP, TCP_NODELAY, &val, sizeof(val)) < 0) {
+        abort();
+    }
     f = qemu_fopen_socket(c);
     if (f == NULL) {
         fprintf(stderr, "could not qemu_fopen socket\n");
