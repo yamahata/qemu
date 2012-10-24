@@ -368,6 +368,67 @@ QEMUFile *qemu_fopen_fd(int fd, const char *mode)
     return s->file;
 }
 
+struct QEMUFileBuf {
+    QEMUFile *file;
+    uint8_t *buffer;
+    size_t buffer_size;
+    size_t buffer_capacity;
+};
+typedef struct QEMUFileBuf QEMUFileBuf;
+
+static int buf_close(void *opaque)
+{
+    QEMUFileBuf *s = opaque;
+    g_free(s->buffer);
+    g_free(s);
+    return 0;
+}
+
+static int buf_put_buffer(void *opaque,
+                          const uint8_t *buf, int64_t pos, int size)
+{
+    QEMUFileBuf *s = opaque;
+
+    int inc = size - (s->buffer_capacity - s->buffer_size);
+    if (inc > 0) {
+        s->buffer_capacity += DIV_ROUND_UP(inc, IO_BUF_SIZE) * IO_BUF_SIZE;
+        s->buffer = g_realloc(s->buffer, s->buffer_capacity);
+    }
+    memcpy(s->buffer + s->buffer_size, buf, size);
+    s->buffer_size += size;
+
+    return size;
+}
+
+QEMUFileBuf *qemu_fopen_buf_write(void)
+{
+    QEMUFileBuf *s = g_malloc0(sizeof(*s));
+    s->file = qemu_fopen_ops(s,  buf_put_buffer, NULL, buf_close,
+                             NULL, NULL, NULL);
+    return s;
+}
+
+static int buf_get_buffer(void *opaque, uint8_t *buf, int64_t pos, int size)
+{
+    QEMUFileBuf *s = opaque;
+    ssize_t len = MIN(size, s->buffer_capacity - s->buffer_size);
+    memcpy(buf, s->buffer + s->buffer_size, len);
+    s->buffer_size += len;
+    return len;
+}
+
+/* This gets the ownership of buf. */
+QEMUFile *qemu_fopen_buf_read(uint8_t *buf, size_t size)
+{
+    QEMUFileBuf *s = g_malloc0(sizeof(*s));
+    s->buffer = buf;
+    s->buffer_size = 0; /* this is used as index to read */
+    s->buffer_capacity = size;
+    s->file = qemu_fopen_ops(s, NULL, buf_get_buffer, buf_close,
+                             NULL, NULL, NULL);
+    return s->file;
+}
+
 static int file_put_buffer(void *opaque, const uint8_t *buf,
                             int64_t pos, int size)
 {
