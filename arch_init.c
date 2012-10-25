@@ -795,7 +795,7 @@ uint64_t ram_save_pending(QEMUFile *f, void *opaque, uint64_t max_size)
     return remaining_size;
 }
 
-static int load_xbzrle(QEMUFile *f, ram_addr_t addr, void *host)
+static int load_xbzrle(QEMUFile *f, void *host)
 {
     int ret, rc = 0;
     unsigned int xh_len;
@@ -884,11 +884,67 @@ void ram_handle_compressed(void *host, uint8_t ch, uint64_t size)
     }
 }
 
+int ram_load_mem_size(QEMUFile *f, ram_addr_t total_ram_bytes)
+{
+    /* Synchronize RAM block list */
+    char id[256];
+    ram_addr_t length;
+
+    while (total_ram_bytes) {
+        RAMBlock *block;
+        uint8_t len;
+
+        len = qemu_get_byte(f);
+        qemu_get_buffer(f, (uint8_t *)id, len);
+        id[len] = 0;
+        length = qemu_get_be64(f);
+
+        QTAILQ_FOREACH(block, &ram_list.blocks, next) {
+            if (!strncmp(id, block->idstr, sizeof(id))) {
+                if (block->length != length) {
+                    fprintf(stderr,
+                            "Length mismatch: %s: " RAM_ADDR_FMT
+                            " in != " RAM_ADDR_FMT "\n", id, length,
+                            block->length);
+                    return -EINVAL;
+                }
+                break;
+            }
+        }
+
+        if (!block) {
+            fprintf(stderr, "Unknown ramblock \"%s\", cannot "
+                    "accept migration\n", id);
+            return -EINVAL;
+        }
+
+        total_ram_bytes -= length;
+    }
+
+    return 0;
+}
+
+int ram_load_page(QEMUFile *f, void *host, int flags)
+{
+    if (flags & RAM_SAVE_FLAG_COMPRESS) {
+        uint8_t ch = qemu_get_byte(f);
+        ram_handle_compressed(host, ch, TARGET_PAGE_SIZE);
+    } else if (flags & RAM_SAVE_FLAG_PAGE) {
+        qemu_get_buffer(f, host, TARGET_PAGE_SIZE);
+    } else if (flags & RAM_SAVE_FLAG_XBZRLE) {
+        if (load_xbzrle(f, host) < 0) {
+            return -EINVAL;
+        }
+    } else if (flags & RAM_SAVE_FLAG_HOOK) {
+        ram_control_load_hook(f, flags);
+    }
+    return 0;
+}
+
 static int ram_load(QEMUFile *f, void *opaque, int version_id)
 {
     ram_addr_t addr;
     int flags, ret = 0;
-    int error;
     static uint64_t seq_iter;
 
     seq_iter++;
@@ -905,82 +961,30 @@ static int ram_load(QEMUFile *f, void *opaque, int version_id)
 
         if (flags & RAM_SAVE_FLAG_MEM_SIZE) {
             if (version_id == 4) {
-                /* Synchronize RAM block list */
-                char id[256];
-                ram_addr_t length;
-                ram_addr_t total_ram_bytes = addr;
-
-                while (total_ram_bytes) {
-                    RAMBlock *block;
-                    uint8_t len;
-
-                    len = qemu_get_byte(f);
-                    qemu_get_buffer(f, (uint8_t *)id, len);
-                    id[len] = 0;
-                    length = qemu_get_be64(f);
-
-                    QTAILQ_FOREACH(block, &ram_list.blocks, next) {
-                        if (!strncmp(id, block->idstr, sizeof(id))) {
-                            if (block->length != length) {
-                                fprintf(stderr,
-                                        "Length mismatch: %s: " RAM_ADDR_FMT
-                                        " in != " RAM_ADDR_FMT "\n", id, length,
-                                        block->length);
-                                ret =  -EINVAL;
-                                goto done;
-                            }
-                            break;
-                        }
-                    }
-
-                    if (!block) {
-                        fprintf(stderr, "Unknown ramblock \"%s\", cannot "
-                                "accept migration\n", id);
-                        ret = -EINVAL;
-                        goto done;
-                    }
-
-                    total_ram_bytes -= length;
+                ret = ram_load_mem_size(f, addr);
+                if (ret) {
+                    goto done;
                 }
             }
         }
 
-        if (flags & RAM_SAVE_FLAG_COMPRESS) {
-            void *host;
-            uint8_t ch;
-
-            host = host_from_stream_offset(f, addr, flags);
-            if (!host) {
-                return -EINVAL;
+        if (flags & (RAM_SAVE_FLAG_COMPRESS | RAM_SAVE_FLAG_PAGE |
+                     RAM_SAVE_FLAG_XBZRLE | RAM_SAVE_FLAG_HOOK)) {
+            void *host = NULL;
+            if (flags & (RAM_SAVE_FLAG_COMPRESS | RAM_SAVE_FLAG_PAGE |
+                         RAM_SAVE_FLAG_XBZRLE)) {
+                host = host_from_stream_offset(f, addr, flags);
+                if (!host) {
+                    return -EINVAL;
+                }
             }
-
-            ch = qemu_get_byte(f);
-            ram_handle_compressed(host, ch, TARGET_PAGE_SIZE);
-        } else if (flags & RAM_SAVE_FLAG_PAGE) {
-            void *host;
-
-            host = host_from_stream_offset(f, addr, flags);
-            if (!host) {
-                return -EINVAL;
-            }
-
-            qemu_get_buffer(f, host, TARGET_PAGE_SIZE);
-        } else if (flags & RAM_SAVE_FLAG_XBZRLE) {
-            void *host = host_from_stream_offset(f, addr, flags);
-            if (!host) {
-                return -EINVAL;
-            }
-
-            if (load_xbzrle(f, addr, host) < 0) {
-                ret = -EINVAL;
+            ret = ram_load_page(f, host, flags);
+            if (ret) {
                 goto done;
             }
-        } else if (flags & RAM_SAVE_FLAG_HOOK) {
-            ram_control_load_hook(f, flags);
         }
-        error = qemu_file_get_error(f);
-        if (error) {
-            ret = error;
+        ret = qemu_file_get_error(f);
+        if (ret) {
             goto done;
         }
     } while (!(flags & RAM_SAVE_FLAG_EOS));
