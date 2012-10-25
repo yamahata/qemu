@@ -48,9 +48,12 @@ CpuDefinitionInfoList *arch_query_cpu_definitions(Error **errp);
 #define RAM_SAVE_VERSION_ID     4 /* currently version 4 */
 
 void ram_save_page_reset(void);
+int ram_load_page(QEMUFile *f, void *host, int flags);
+
 #if defined(NEED_CPU_H) && !defined(CONFIG_USER_ONLY)
 void ram_save_bulk_stage_done(void);
 void ram_save_page(QEMUFile *f, RAMBlock *block, ram_addr_t offset);
+int ram_load_mem_size(QEMUFile *f, ram_addr_t total_ram_bytes);
 #endif
 
 #endif
