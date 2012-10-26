@@ -659,7 +659,7 @@ static int ram_save_iterate(QEMUFile *f, void *opaque)
     qemu_put_be64(f, RAM_SAVE_FLAG_EOS);
 
     expected_downtime = ram_save_remaining() * TARGET_PAGE_SIZE / bwidth;
-    DPRINTF("ram_save_live: expected(%" PRIu64 ") <= max(" PRIu64 ")?\n",
+    DPRINTF("ram_save_iterate: expected(%" PRIu64 ") <= max(%" PRIu64 ")?\n",
             expected_downtime, migrate_max_downtime());
 
     if (expected_downtime <= migrate_max_downtime()) {
