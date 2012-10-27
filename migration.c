@@ -510,7 +510,8 @@ void migrate_del_blocker(Error *reason)
 
 void qmp_migrate(const char *uri, bool has_blk, bool blk,
                  bool has_inc, bool inc, bool has_detach, bool detach,
-                 bool has_postcopy, bool postcopy, Error **errp)
+                 bool has_postcopy, bool postcopy, bool has_nobg, bool nobg,
+                 Error **errp)
 {
     MigrationState *s = migrate_get_current();
     MigrationParams params;
@@ -520,6 +521,7 @@ void qmp_migrate(const char *uri, bool has_blk, bool blk,
     params.blk = blk;
     params.shared = inc;
     params.postcopy = postcopy;
+    params.nobg = nobg;
 
     if (s->state == MIG_STATE_ACTIVE) {
         error_set(errp, QERR_MIGRATION_ACTIVE);
