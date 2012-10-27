@@ -156,6 +156,7 @@ void migrate_add_blocker(Error *reason);
 void migrate_del_blocker(Error *reason);
 
 bool migration_postcopy_outgoing(void);
+bool migration_postcopy_outgoing_no_background(void);
 
 bool migrate_rdma_pin_all(void);
 bool migrate_zero_blocks(void);
