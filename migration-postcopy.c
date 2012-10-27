@@ -494,6 +494,13 @@ static int postcopy_outgoing_ram_save_background(
         abort();
     }
 
+    if (migrate_postcopy_outgoing_no_background()) {
+        if (ram_bytes_remaining() == 0) {
+            postcopy_outgoing_ram_all_sent(f, s);
+        }
+        return 0;
+    }
+
     i = 0;
     t0 = qemu_get_clock_ns(rt_clock);
     migration_update_rate_limit_stat(ms, rlstat, t0);

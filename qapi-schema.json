@@ -633,7 +633,7 @@
 ##
 { 'enum': 'MigrationCapability',
   'data': ['xbzrle', 'x-rdma-pin-all', 'auto-converge', 'zero-blocks',
-           'postcopy' ] }
+           'postcopy', 'postcopy-no-background' ] }
 
 ##
 # @MigrationCapabilityStatus
