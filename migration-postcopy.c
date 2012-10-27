@@ -557,6 +557,13 @@ int postcopy_outgoing_ram_save_background(QEMUFile *f, void *postcopy)
         abort();
     }
 
+    if (s->ms->params.nobg) {
+        if (ram_bytes_remaining() == 0) {
+            postcopy_outgoing_ram_all_sent(f, s);
+        }
+        return 0;
+    }
+
     DPRINTF("outgoing background state: %d\n", s->state);
     i = 0;
     t0 = qemu_get_clock_ns(rt_clock);
