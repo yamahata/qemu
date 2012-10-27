@@ -25,6 +25,7 @@ struct MigrationParams {
     bool blk;
     bool shared;
     bool postcopy;
+    bool nobg;
 };
 
 typedef struct MigrationState MigrationState;
