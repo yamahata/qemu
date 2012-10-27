@@ -523,6 +523,13 @@ static int postcopy_outgoing_ram_save_background(
         abort();
     }
 
+    if (ms->params.nobg) {
+        if (ram_bytes_remaining() == 0) {
+            postcopy_outgoing_ram_all_sent(f, s);
+        }
+        return 0;
+    }
+
     while (qemu_file_rate_limit(f) == 0) {
         int nfds = -1;
         int readfd = qemu_get_fd(ms->file_read);
