@@ -1038,6 +1038,7 @@ void hmp_migrate(Monitor *mon, const QDict *qdict)
     int postcopy = qdict_get_try_bool(qdict, "postcopy", 0);
     int movebg = qdict_get_try_bool(qdict, "movebg", 0);
     int nobg = qdict_get_try_bool(qdict, "nobg", 0);
+    int precopy_count = qdict_get_try_int(qdict, "precopy_count", 0);
     int forward = qdict_get_try_int(qdict, "forward", 0);
     int backward = qdict_get_try_int(qdict, "backward", 0);
     const char *uri = qdict_get_str(qdict, "uri");
@@ -1045,6 +1046,7 @@ void hmp_migrate(Monitor *mon, const QDict *qdict)
 
     qmp_migrate(uri, !!blk, blk, !!inc, inc, false, false,
                 !!postcopy, postcopy, !!movebg, movebg, !!nobg, nobg,
+                !!precopy_count, precopy_count,
                 !!forward, forward, !!backward, backward,
                 &err);
     if (err) {
