@@ -321,7 +321,7 @@ int postcopy_outgoing_create_read_socket(MigrationState *s)
     return 0;
 }
 
-void postcopy_outgoing_state_begin(QEMUFile *f)
+void postcopy_outgoing_state_begin(QEMUFile *f, const MigrationParams *params)
 {
     uint64_t options = 0;
     qemu_put_ubyte(f, QEMU_VM_POSTCOPY_INIT);
