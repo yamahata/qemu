@@ -637,7 +637,7 @@ static int ram_save_setup(QEMUFile *f, void *opaque)
     return 0;
 }
 
-static int ram_save_iterate(QEMUFile *f, void *opaque)
+int ram_save_iterate(QEMUFile *f)
 {
     uint64_t bytes_transferred_last;
     double bwidth = 0;
@@ -707,6 +707,11 @@ static int ram_save_iterate(QEMUFile *f, void *opaque)
         return expected_downtime <= migrate_max_downtime();
     }
     return 0;
+}
+
+static int ram_save_iterate_bwidth(QEMUFile *f, void *opaque)
+{
+    return ram_save_iterate(f);
 }
 
 static int ram_save_complete(QEMUFile *f, void *opaque)
@@ -941,7 +946,7 @@ static void ram_save_set_params(const MigrationParams *params, void *opaque)
         savevm_ram_handlers.save_live_complete =
             postcopy_outgoing_ram_save_complete;
     } else {
-        savevm_ram_handlers.save_live_iterate = ram_save_iterate;
+        savevm_ram_handlers.save_live_iterate = ram_save_iterate_bwidth;
         savevm_ram_handlers.save_live_complete = ram_save_complete;
     }
 }
@@ -949,7 +954,7 @@ static void ram_save_set_params(const MigrationParams *params, void *opaque)
 SaveVMHandlers savevm_ram_handlers = {
     .set_params = ram_save_set_params,
     .save_live_setup = ram_save_setup,
-    .save_live_iterate = ram_save_iterate,
+    .save_live_iterate = ram_save_iterate_bwidth,
     .save_live_complete = ram_save_complete,
     .load_state = ram_load_precopy,
     .cancel = ram_migration_cancel,
