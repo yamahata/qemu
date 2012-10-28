@@ -27,6 +27,7 @@ struct MigrationParams {
     bool postcopy;
     bool nobg;
     bool movebg;
+    int precopy_count;
     int64_t prefault_forward;
     int64_t prefault_backward;
 };
@@ -149,7 +150,7 @@ int64_t xbzrle_cache_resize(int64_t new_size);
 
 /* For outgoing postcopy */
 int postcopy_outgoing_create_read_socket(MigrationState *s);
-void postcopy_outgoing_state_begin(QEMUFile *f);
+void postcopy_outgoing_state_begin(QEMUFile *f, const MigrationParams *params);
 void postcopy_outgoing_state_complete(
     QEMUFile *f, const uint8_t *buffer, size_t buffer_size);
 int postcopy_outgoing_ram_save_iterate(QEMUFile *f, void *opaque);

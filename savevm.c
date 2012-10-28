@@ -1648,7 +1648,7 @@ int qemu_savevm_state_begin(QEMUFile *f,
     if (params->postcopy) {
         /* tell this is postcopy */
         qemu_put_byte(f, QEMU_VM_POSTCOPY);
-        postcopy_outgoing_state_begin(f);
+        postcopy_outgoing_state_begin(f, params);
     }
 
     QTAILQ_FOREACH(se, &savevm_handlers, entry) {
@@ -1834,6 +1834,7 @@ static int qemu_savevm_state(QEMUFile *f)
         .blk = 0,
         .shared = 0,
         .postcopy = 0,
+        .precopy_count = 0,
         .movebg = 0,
         .nobg = 0,
     };
