@@ -43,6 +43,16 @@ struct QEMUUMemReq {
 typedef struct QEMUUMemReq QEMUUMemReq;
 
 uint64_t postcopy_bitmap_length(uint64_t length);
+static inline uint64_t postcopy_bitmap_to_uint64(const unsigned long *bitmap)
+{
+#if HOST_LONG_BITS == 64
+    return bitmap[0];
+#elif HOST_LONG_BITS == 32
+    return bitmap[0] | ((uint64_t)bitmap[1] << 32);
+#else
+# error "unsupported"
+#endif
+}
 void postcopy_be64_to_bitmap(uint8_t *buffer, uint64_t length);
 
 /* outgoing part */
