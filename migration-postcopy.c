@@ -329,6 +329,10 @@ int postcopy_outgoing_create_read_socket(MigrationState *s, int fd)
 void postcopy_outgoing_state_begin(QEMUFile *f, const MigrationParams *params)
 {
     uint64_t options = 0;
+    if (params->precopy_count > 0) {
+        options |= POSTCOPY_OPTION_PRECOPY;
+    }
+
     qemu_put_ubyte(f, QEMU_VM_POSTCOPY_INIT);
     qemu_put_be32(f, sizeof(options));
     qemu_put_be64(f, options);
@@ -344,12 +348,40 @@ void postcopy_outgoing_state_complete(
 
 int postcopy_outgoing_ram_save_iterate(QEMUFile *f, void *opaque)
 {
-    qemu_put_be64(f, RAM_SAVE_FLAG_EOS);
-    return 1;
+    int ret;
+    MigrationState *ms = migrate_get_current();
+    if (ms->params.precopy_count == 0) {
+        qemu_put_be64(f, RAM_SAVE_FLAG_EOS);
+        return 1;
+    }
+
+    ret = ram_save_iterate(f);
+    if (ret < 0) {
+        return ret;
+    }
+    if (ret == 1) {
+        DPRINTF("precopy worked\n");
+        return ret;
+    }
+    if (ram_bytes_remaining() == 0) {
+        DPRINTF("no more precopy\n");
+        return 1;
+    }
+    return ms->precopy_count >= ms->params.precopy_count? 1: 0;
 }
 
 int postcopy_outgoing_ram_save_complete(QEMUFile *f, void *opaque)
 {
+    MigrationState *ms = migrate_get_current();
+    if (ms->params.precopy_count > 0) {
+        /* Make sure all dirty bits are set */
+        qemu_mutex_lock_ramlist();
+        migration_bitmap_sync();
+        memory_global_dirty_log_stop();
+        qemu_mutex_unlock_ramlist();
+    } else {
+        migration_bitmap_init();
+    }
     ram_save_page_reset();
     ram_save_bulk_stage_done();
     qemu_put_be64(f, RAM_SAVE_FLAG_EOS);
@@ -359,6 +391,11 @@ int postcopy_outgoing_ram_save_complete(QEMUFile *f, void *opaque)
 uint64_t postcopy_outgoing_ram_save_pending(QEMUFile *f, void *opaque,
                                             uint64_t max_size)
 {
+    MigrationState *ms = migrate_get_current();
+    if (ms->params.precopy_count > 0 &&
+        ms->precopy_count < ms->params.precopy_count) {
+        return ram_save_pending(f, opaque, max_size);
+    }
     return 0;
 }
 
@@ -520,6 +557,66 @@ static void postcopy_outgoing_recv_handler(MigrationState *ms)
     }
 }
 
+static void postcopy_outgoing_send_dirty_bitmap(QEMUFile *f)
+{
+    uint64_t last_long;
+    const RAMBlock *block;
+
+    /* send dirty bitmap */
+    qemu_mutex_lock_ramlist();
+    last_long = BITS_TO_LONGS(last_ram_offset() >> TARGET_PAGE_BITS);
+    QTAILQ_FOREACH(block, &ram_list.blocks, next) {
+        const unsigned long *bitmap = migration_bitmap_get();
+        uint64_t length;
+        uint64_t start;
+        uint64_t end;
+        uint64_t i;
+
+        qemu_put_byte(f, strlen(block->idstr));
+        qemu_put_buffer(f, (uint8_t *)block->idstr, strlen(block->idstr));
+        qemu_put_be64(f, block->offset);
+        qemu_put_be64(f, block->length);
+
+        start = (block->offset >> TARGET_PAGE_BITS);
+        end = (block->offset + block->length) >> TARGET_PAGE_BITS;
+
+        length = BITS_TO_LONGS(end - (start & ~63)) * sizeof(unsigned long);
+        length = DIV_ROUND_UP(length, sizeof(uint64_t)) * sizeof(uint64_t);
+        qemu_put_be64(f, length);
+        DPRINTF("dirty bitmap %s 0x%"PRIx64" 0x%"PRIx64" 0x%"PRIx64"\n",
+                block->idstr, block->offset, block->length, length);
+
+        start /= BITS_PER_LONG;
+        end = DIV_ROUND_UP(end, BITS_PER_LONG);
+        assert(end <= last_long);
+
+        for (i = start; i < end;
+             i += sizeof(uint64_t) / sizeof(unsigned long)) {
+            uint64_t val;
+#if HOST_LONG_BITS == 64
+            val = bitmap[i];
+#elif HOST_LONG_BITS == 32
+            if (i + 1 < last_long) {
+                val = bitmap[i] | ((uint64_t)bitmap[i + 1] << 32);
+            } else {
+                val = bitmap[i];
+            }
+#else
+# error "unsupported"
+#endif
+            qemu_put_be64(f, val);
+        }
+    }
+    qemu_mutex_unlock_ramlist();
+
+    /* terminator */
+    qemu_put_byte(f, 0);    /* idstr len */
+    qemu_put_be64(f, 0);    /* block offset */
+    qemu_put_be64(f, 0);    /* block length */
+    qemu_put_be64(f, 0);    /* bitmap len */
+    DPRINTF("sent dirty bitmap\n");
+}
+
 PostcopyOutgoingState *postcopy_outgoing_begin(MigrationState *ms)
 {
     PostcopyOutgoingState *s = g_new(PostcopyOutgoingState, 1);
@@ -527,6 +624,9 @@ PostcopyOutgoingState *postcopy_outgoing_begin(MigrationState *ms)
     s->state = PO_STATE_ACTIVE;
     s->last_block_read = NULL;
 
+    if (ms->params.precopy_count > 0) {
+        postcopy_outgoing_send_dirty_bitmap(ms->file);
+    }
     qemu_fflush(ms->file);
     qemu_file_reset_rate_limit(ms->file);
     return s;

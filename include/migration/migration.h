@@ -58,6 +58,7 @@ struct MigrationState
     int substate;              /* precopy or postcopy */
     QEMUFile *file_read;        /* connection from the detination */
     PostcopyOutgoingState *postcopy;
+    int precopy_count;
 };
 
 struct MigrationRateLimitStat
