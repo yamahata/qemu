@@ -276,6 +276,9 @@ static void postcopy_outgoing_free_req(QEMUUMemReq *req)
 #define QEMU_VM_POSTCOPY_INIT           0
 #define QEMU_VM_POSTCOPY_SECTION_FULL   1
 
+/* options in QEMU_VM_POSTCOPY_INIT section */
+#define POSTCOPY_OPTION_PRECOPY         1ULL
+
 /***************************************************************************
  * outgoing part
  */
@@ -764,6 +767,7 @@ struct UMemBlock {
                                            in TARGET_PAGE_SIZE */
     unsigned long *phys_received;       /* thread to read from outgoing qemu
                                            in TARGET_PAGE_SIZE */
+    unsigned long *clean_bitmap;
     unsigned long nr_pending_clean;     /* protected by pending_clean_mutex */
     unsigned long *pending_clean_bitmap;/* protected by pending_clean_mutex */
 };
@@ -782,6 +786,7 @@ struct PostcopyIncomingUMemDaemon {
     int nr_target_pages_per_host_page;
     int target_to_host_page_shift;
     int version_id;     /* save/load format version id */
+    bool precopy_enabled;
 
     QemuThread thread;
     QLIST_HEAD(, UMemBlock) blocks;
@@ -803,6 +808,7 @@ struct PostcopyIncomingUMemDaemon {
     /* bitmap indexed by target page offset */
     UMemPages *page_cached;
     int fault_write_fd;         /* umem daemon -> qemu on destination */
+    QemuThread bitmap_thread;
 
     /* thread to write to outgoing qemu */
     QemuThread mig_write_thread;
@@ -843,6 +849,7 @@ static PostcopyIncomingState state = {
 
 static PostcopyIncomingUMemDaemon umemd = {
     .state = 0,
+    .precopy_enabled = false,
     .to_qemu_fd = -1,
     .to_qemu = NULL,
     .from_qemu_fd = -1,
@@ -854,6 +861,8 @@ static PostcopyIncomingUMemDaemon umemd = {
 
 static void postcopy_incoming_umemd(void);
 static void postcopy_incoming_qemu_handle_req(void *opaque);
+static UMemBlock *postcopy_incoming_umem_block_from_stream(
+    QEMUFile *f, int flags);
 static void postcopy_incoming_create_fault_thread(int read_fd, int write_fd);
 
 /* protected by qemu_mutex_lock_ramlist() */
@@ -933,6 +942,25 @@ static int postcopy_incoming_ram_load(QEMUFile *f, void *opaque, int version_id)
     return -EINVAL;
 }
 
+static void*
+postcopy_incoming_shmem_from_stream_offset(QEMUFile *f, ram_addr_t offset,
+                                           int flags)
+{
+    UMemBlock *block = postcopy_incoming_umem_block_from_stream(f, flags);
+    if (block == NULL) {
+        DPRINTF("error block = NULL\n");
+        return NULL;
+    }
+    return block->umem->shmem + offset;
+}
+
+static int postcopy_incoming_ram_load_precopy(QEMUFile *f, void *opaque,
+                                              int version_id)
+{
+    return ram_load(f, opaque, version_id,
+                    &postcopy_incoming_shmem_from_stream_offset);
+}
+
 static void postcopy_incoming_umem_block_free(void)
 {
     UMemBlock *block;
@@ -947,6 +975,7 @@ static void postcopy_incoming_umem_block_free(void)
         QLIST_REMOVE(block, next);
         g_free(block->phys_requested);
         g_free(block->phys_received);
+        g_free(block->clean_bitmap);
         g_free(block->pending_clean_bitmap);
         g_free(block);
     }
@@ -1026,6 +1055,12 @@ static int postcopy_incoming_loadvm_init(QEMUFile *f, uint32_t size)
         return -EINVAL;
     }
     options = qemu_get_be64(f);
+    if (options & POSTCOPY_OPTION_PRECOPY) {
+        options &= ~POSTCOPY_OPTION_PRECOPY;
+        umemd.precopy_enabled = true;
+    } else {
+        umemd.precopy_enabled = false;
+    }
     if (options) {
         fprintf(stderr, "unknown options 0x%"PRIx64, options);
         return -ENOSYS;
@@ -1043,12 +1078,16 @@ static int postcopy_incoming_loadvm_init(QEMUFile *f, uint32_t size)
         return -ENOSYS;
     }
 
-    DPRINTF("detected POSTCOPY\n");
+    DPRINTF("detected POSTCOPY precpoy %d\n", umemd.precopy_enabled);
     error = postcopy_incoming_prepare();
     if (error) {
         return error;
     }
-    savevm_ram_handlers.load_state = postcopy_incoming_ram_load;
+    if (umemd.precopy_enabled) {
+        savevm_ram_handlers.load_state = postcopy_incoming_ram_load_precopy;
+    } else {
+        savevm_ram_handlers.load_state = postcopy_incoming_ram_load;
+    }
     return 0;
 }
 
@@ -1865,6 +1904,213 @@ static void postcopy_incoming_umemd_pending_clean_create(void)
                        QEMU_THREAD_JOINABLE);
 }
 
+static void *postcopy_incoming_umemd_fault_clean_bitmap(void *args)
+{
+    int i;
+    UMemBlock *block;
+    uint64_t buffer[(sizeof(UMemPages) + PIPE_BUF + 7) / sizeof(uint64_t)];
+    UMemPages * const page_cached = (UMemPages*)buffer;
+    int max_nr = PIPE_BUF / sizeof(uint64_t);
+    int needed;
+
+    if (TARGET_PAGE_SIZE >= umemd.host_page_size) {
+        needed = umemd.nr_host_pages_per_target_page;
+    } else {
+        needed = 1;
+    }
+    assert(needed <= max_nr);
+
+    DPRINTF("faulting clean bitmap\n");
+    QLIST_FOREACH(block, &umemd.blocks, next) {
+        const int nbits = block->length >> TARGET_PAGE_BITS;
+        int bit;
+        int error;
+
+        DPRINTF("idstr %s\n", block->idstr);
+        page_cached->nr = 0;
+        for (bit = find_first_bit(block->clean_bitmap, nbits);
+             bit < nbits;
+             bit = find_next_bit(block->clean_bitmap, nbits, ++bit)) {
+            if (TARGET_PAGE_SIZE >= umemd.host_page_size) {
+                uint64_t pgoff = bit << umemd.target_to_host_page_shift;
+                for (i = 0; i < umemd.nr_host_pages_per_target_page; i++) {
+                    page_cached->pgoffs[page_cached->nr] = pgoff + i;
+                    page_cached->nr++;
+                }
+            } else {
+                bool mark_cache = true;
+                if ((bit % umemd.nr_target_pages_per_host_page) != 0) {
+                    /* skip to next host page */
+                    bit |= umemd.nr_target_pages_per_host_page - 1;
+                    continue;
+                }
+                for (i = 0; i < umemd.nr_target_pages_per_host_page; i++) {
+                    if (!test_bit(bit + i, block->clean_bitmap)) {
+                        mark_cache = false;
+                        break;
+                    }
+                }
+                if (mark_cache) {
+                    page_cached->pgoffs[page_cached->nr] =
+                        bit >> (umemd.host_page_shift - TARGET_PAGE_BITS);
+                    page_cached->nr++;
+                }
+            }
+            if (max_nr - page_cached->nr < needed) {
+                error = postcopy_incoming_umem_mark_cached(block->umem,
+                                                           page_cached, false);
+                if (error) {
+                    goto error_out;
+                }
+                page_cached->nr = 0;
+            }
+        }
+        if (page_cached->nr > 0) {
+            error = postcopy_incoming_umem_mark_cached(block->umem,
+                                                       page_cached, false);
+            if (error) {
+                goto error_out;
+            }
+        }
+    }
+
+out:
+    DPRINTF("faulting clean bitmap done\n");
+    postcopy_incoming_umemd_pending_clean_create();
+    return NULL;
+
+error_out:
+    perror("umemd bitmap pipe write\n");
+    fd_close(&umemd.fault_write_fd);
+    goto out;
+}
+
+static int postcopy_incoming_umemd_read_dirty_bitmap(
+    QEMUFile *f, const char *idstr, uint8_t idlen,
+    uint64_t block_offset, uint64_t block_length, uint64_t bitmap_length)
+{
+    UMemBlock *block;
+    const uint64_t bit_start = block_offset >> TARGET_PAGE_BITS;
+    const uint64_t bit_end = (block_offset + block_length) >> TARGET_PAGE_BITS;
+    uint64_t bit_offset;
+    uint8_t *buffer;
+    uint64_t index;
+
+    if ((bitmap_length % sizeof(uint64_t)) != 0) {
+        return -EINVAL;
+    }
+    QLIST_FOREACH(block, &umemd.blocks, next) {
+        if (!strncmp(block->idstr, idstr, idlen)) {
+            break;
+        }
+    }
+    if (block == NULL) {
+        return -EINVAL;
+    }
+
+    DPRINTF("bitmap %s 0x%"PRIx64" 0x%"PRIx64" 0x%"PRIx64"\n",
+            block->idstr, block_offset, block_length, bitmap_length);
+    buffer = g_malloc(bitmap_length);
+    qemu_get_buffer(f, buffer, bitmap_length);
+
+    /* setting phys_requested is racey,
+       but write side just sends redundant request */
+    bit_offset = bit_start & ~63;
+    if (bit_offset == bit_start) {
+        for (index = 0; index < bitmap_length; index += sizeof(uint64_t)) {
+            uint64_t bitmap = be64_to_cpup((uint64_t*)(buffer + index));
+#if HOST_LONG_BITS == 64
+            *(block->phys_received + index / sizeof(uint64_t)) = ~bitmap;
+#elif HOST_LONG_BITS == 32
+            *(block->phys_received + index / sizeof(uint32_t)) = ~bitmap;
+            *(block->phys_received + index / sizeof(uint32_t) + 1) =
+                ~(bitmap >> 32);
+#else
+# error "unsupported"
+#endif
+        }
+    } else {
+        for (index = 0; index < bitmap_length; index += sizeof(uint64_t)) {
+            uint64_t bitmap;
+            int i;
+
+            bitmap = be64_to_cpup((uint64_t*)(buffer + index));
+            for (i = 0; i < 64; i++) {
+                int bit = bit_offset + i;
+                if (bit < bit_start) {
+                    continue;
+                }
+                if (bit >= bit_end) {
+                    break;
+                }
+                if (!(bitmap & (1ULL << i))) {
+                    set_bit(bit - bit_start, block->phys_received);
+                }
+            }
+            bit_offset += 64;
+        }
+    }
+
+    bitmap_copy(block->phys_requested, block->phys_received,
+                block->length >> TARGET_PAGE_BITS);
+    /* race with postcopy_incoming_umem_send_page_req,
+       but it only sends redundant page requests which will be discarded */
+    bitmap_copy(block->clean_bitmap, block->phys_received,
+                block->length >> TARGET_PAGE_BITS);
+    g_free(buffer);
+    return 0;
+}
+
+static int postcopy_incoming_umemd_mig_read_init(void)
+{
+    QEMUFile *f = umemd.mig_read;
+#ifdef DEBUG_POSTCOPY
+    uint64_t start = qemu_get_clock_ns(rt_clock);
+    uint64_t end;
+#endif
+
+    if (!umemd.precopy_enabled) {
+        postcopy_incoming_umemd_pending_clean_create();
+        return 0;
+    }
+
+    for (;;) {
+        uint8_t idlen;
+        char idstr[256];
+        uint64_t block_offset;
+        uint64_t block_length;
+        uint64_t bitmap_length;
+        int ret;
+
+        idlen = qemu_get_byte(f);
+        qemu_get_buffer(f, (uint8_t*)idstr, idlen);
+        idstr[idlen] = 0;
+        block_offset = qemu_get_be64(f);
+        block_length = qemu_get_be64(f);
+        bitmap_length = qemu_get_be64(f);
+
+        if (idlen == 0 && block_offset == 0 && block_length == 0 &&
+            bitmap_length == 0) {
+            DPRINTF("bitmap done\n");
+            break;
+        }
+        ret = postcopy_incoming_umemd_read_dirty_bitmap(
+            f, idstr, idlen, block_offset, block_length, bitmap_length);
+        if (ret < 0) {
+            return ret;
+        }
+    }
+    qemu_thread_create(&umemd.bitmap_thread,
+                       &postcopy_incoming_umemd_fault_clean_bitmap,
+                       NULL, QEMU_THREAD_JOINABLE);
+    postcopy_incoming_umem_check_umem_done();
+#ifdef DEBUG_POSTCOPY
+    end = qemu_get_clock_ns(rt_clock);
+    DPRINTF("bitmap %"PRIu64" nsec\n", end - start);
+#endif
+    return 0;
+}
+
 static int postcopy_incoming_umemd_mig_read_loop(void)
 {
     int error;
@@ -2139,6 +2385,9 @@ static void postcopy_incoming_umemd(void)
         int nbits = block->length >> TARGET_PAGE_BITS;
         block->phys_requested = bitmap_new(nbits);
         block->phys_received = bitmap_new(nbits);
+        if (umemd.precopy_enabled) {
+            block->clean_bitmap = bitmap_new(nbits);
+        }
         block->nr_pending_clean = 0;
         block->pending_clean_bitmap =
             bitmap_new(block->length >> umemd.host_page_shift);
@@ -2153,11 +2402,11 @@ static void postcopy_incoming_umemd(void)
     qemu_thread_create(&umemd_fault_thread,
                        &postcopy_incoming_umemd_fault_thread, NULL,
                        QEMU_THREAD_JOINABLE);
-    postcopy_incoming_umemd_pending_clean_create();
     qemu_thread_create(&umemd.mig_read_thread,
                        &postcopy_incoming_umemd_thread,
                        &(IncomingThread) {
-                           NULL, &postcopy_incoming_umemd_mig_read_loop,},
+                           &postcopy_incoming_umemd_mig_read_init,
+                           &postcopy_incoming_umemd_mig_read_loop,},
                        QEMU_THREAD_JOINABLE);
     qemu_thread_create(&umemd.mig_write_thread,
                        &postcopy_incoming_umemd_thread,
@@ -2171,6 +2420,9 @@ static void postcopy_incoming_umemd(void)
                        QEMU_THREAD_JOINABLE);
 
     qemu_thread_join(&umemd.mig_read_thread);
+    if (umemd.precopy_enabled) {
+        qemu_thread_join(&umemd.bitmap_thread);
+    }
     qemu_thread_join(&umemd.mig_write_thread);
     qemu_thread_join(&umemd.pipe_thread);
 
