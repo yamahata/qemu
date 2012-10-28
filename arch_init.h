@@ -47,6 +47,7 @@ CpuDefinitionInfoList GCC_WEAK_DECL *arch_query_cpu_definitions(Error **errp);
 #define RAM_SAVE_VERSION_ID     4 /* currently version 4 */
 
 int ram_load_page(QEMUFile *f, void *host, int flags);
+int ram_save_iterate(QEMUFile *f);
 
 #if defined(NEED_CPU_H) && !defined(CONFIG_USER_ONLY)
 void ram_save_set_last_block(RAMBlock *block, ram_addr_t offset);
