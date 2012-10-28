@@ -1213,12 +1213,14 @@ void hmp_migrate(Monitor *mon, const QDict *qdict)
     int detach = qdict_get_try_bool(qdict, "detach", 0);
     int blk = qdict_get_try_bool(qdict, "blk", 0);
     int inc = qdict_get_try_bool(qdict, "inc", 0);
+    int precopy_count = qdict_get_try_int(qdict, "precopy_count", 0);
     int forward = qdict_get_try_int(qdict, "forward", 0);
     int backward = qdict_get_try_int(qdict, "backward", 0);
     const char *uri = qdict_get_str(qdict, "uri");
     Error *err = NULL;
 
     qmp_migrate(uri, !!blk, blk, !!inc, inc, false, false,
+                !!precopy_count, precopy_count,
                 !!forward, forward, !!backward, backward,
                 &err);
     if (err) {
