@@ -871,7 +871,9 @@ int ram_load_page(QEMUFile *f, void *host, int flags)
     return 0;
 }
 
-static int ram_load(QEMUFile *f, void *opaque, int version_id)
+int ram_load(QEMUFile *f, void *opaque, int version_id,
+             void *(host_from_stream_offset_p)(QEMUFile *f,
+                                               ram_addr_t offsset, int flags))
 {
     ram_addr_t addr;
     int flags, ret = 0;
@@ -903,7 +905,7 @@ static int ram_load(QEMUFile *f, void *opaque, int version_id)
 
         if (flags & (RAM_SAVE_FLAG_COMPRESS | RAM_SAVE_FLAG_PAGE |
                      RAM_SAVE_FLAG_XBZRLE)) {
-            host = host_from_stream_offset(f, addr, flags);
+            host = host_from_stream_offset_p(f, addr, flags);
             if (!host) {
                 return -EINVAL;
             }
@@ -926,6 +928,11 @@ done:
     return ret;
 }
 
+static int ram_load_precopy(QEMUFile *f, void *opaque, int version_id)
+{
+    return ram_load(f, opaque, version_id, &host_from_stream_offset);
+}
+
 static void ram_save_set_params(const MigrationParams *params, void *opaque)
 {
     if (params->postcopy) {
@@ -944,7 +951,7 @@ SaveVMHandlers savevm_ram_handlers = {
     .save_live_setup = ram_save_setup,
     .save_live_iterate = ram_save_iterate,
     .save_live_complete = ram_save_complete,
-    .load_state = ram_load,
+    .load_state = ram_load_precopy,
     .cancel = ram_migration_cancel,
 };
 
