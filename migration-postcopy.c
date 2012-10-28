@@ -167,11 +167,434 @@ static void postcopy_incoming_send_req(QEMUFile *f,
     }
 }
 
+static int postcopy_outgoing_recv_req_idstr(QEMUFile *f,
+                                            struct qemu_umem_req *req,
+                                            size_t *offset)
+{
+    int ret;
+
+    req->len = qemu_peek_byte(f, *offset);
+    *offset += 1;
+    if (req->len == 0) {
+        return -EAGAIN;
+    }
+    req->idstr = g_malloc((int)req->len + 1);
+    ret = qemu_peek_buffer(f, (uint8_t*)req->idstr, req->len, *offset);
+    *offset += ret;
+    if (ret != req->len) {
+        g_free(req->idstr);
+        req->idstr = NULL;
+        return -EAGAIN;
+    }
+    req->idstr[req->len] = 0;
+    return 0;
+}
+
+static int postcopy_outgoing_recv_req_pgoffs(QEMUFile *f,
+                                             struct qemu_umem_req *req,
+                                             size_t *offset)
+{
+    int ret;
+    uint32_t be32;
+    uint32_t i;
+
+    ret = qemu_peek_buffer(f, (uint8_t*)&be32, sizeof(be32), *offset);
+    *offset += sizeof(be32);
+    if (ret != sizeof(be32)) {
+        return -EAGAIN;
+    }
+
+    req->nr = be32_to_cpu(be32);
+    req->pgoffs = g_new(uint64_t, req->nr);
+    for (i = 0; i < req->nr; i++) {
+        uint64_t be64;
+        ret = qemu_peek_buffer(f, (uint8_t*)&be64, sizeof(be64), *offset);
+        *offset += sizeof(be64);
+        if (ret != sizeof(be64)) {
+            g_free(req->pgoffs);
+            req->pgoffs = NULL;
+            return -EAGAIN;
+        }
+        req->pgoffs[i] = be64_to_cpu(be64);
+    }
+    return 0;
+}
+
+static int postcopy_outgoing_recv_req(QEMUFile *f, struct qemu_umem_req *req)
+{
+    int size;
+    int ret;
+    size_t offset = 0;
+
+    size = qemu_peek_buffer(f, (uint8_t*)&req->cmd, 1, offset);
+    if (size <= 0) {
+        return -EAGAIN;
+    }
+    offset += 1;
+
+    switch (req->cmd) {
+    case QEMU_UMEM_REQ_INIT:
+    case QEMU_UMEM_REQ_EOC:
+        /* nothing */
+        break;
+    case QEMU_UMEM_REQ_PAGE:
+        ret = postcopy_outgoing_recv_req_idstr(f, req, &offset);
+        if (ret < 0) {
+            return ret;
+        }
+        ret = postcopy_outgoing_recv_req_pgoffs(f, req, &offset);
+        if (ret < 0) {
+            return ret;
+        }
+        break;
+    case QEMU_UMEM_REQ_PAGE_CONT:
+        ret = postcopy_outgoing_recv_req_pgoffs(f, req, &offset);
+        if (ret < 0) {
+            return ret;
+        }
+        break;
+    default:
+        abort();
+        break;
+    }
+    qemu_file_skip(f, offset);
+    DPRINTF("cmd %d\n", req->cmd);
+    return 0;
+}
+
+static void postcopy_outgoing_free_req(struct qemu_umem_req *req)
+{
+    g_free(req->idstr);
+    g_free(req->pgoffs);
+}
+
 /***************************************************************************
  * QEMU_VM_POSTCOPY section subtype
  */
 #define QEMU_VM_POSTCOPY_INIT           0
 #define QEMU_VM_POSTCOPY_SECTION_FULL   1
+
+/***************************************************************************
+ * outgoing part
+ */
+
+enum POState {
+    PO_STATE_ERROR_RECEIVE,
+    PO_STATE_ACTIVE,
+    PO_STATE_EOC_RECEIVED,
+    PO_STATE_ALL_PAGES_SENT,
+    PO_STATE_COMPLETED,
+};
+typedef enum POState POState;
+
+struct PostcopyOutgoingState {
+    POState state;
+    QEMUFile *mig_read;
+    int fd_read;
+    RAMBlock *last_block_read;
+
+    QEMUFile *mig_buffered_write;
+    MigrationState *ms;
+};
+
+int postcopy_outgoing_create_read_socket(MigrationState *s)
+{
+    if (!s->params.postcopy) {
+        return 0;
+    }
+
+    s->fd_read = dup(s->fd);
+    if (s->fd_read == -1) {
+        int ret = -errno;
+        perror("dup");
+        return ret;
+    }
+    s->file_read = qemu_fopen_socket(s->fd_read);
+    if (s->file_read == NULL) {
+        return -EINVAL;
+    }
+    return 0;
+}
+
+void postcopy_outgoing_state_begin(QEMUFile *f)
+{
+    uint64_t options = 0;
+    qemu_put_ubyte(f, QEMU_VM_POSTCOPY_INIT);
+    qemu_put_be32(f, sizeof(options));
+    qemu_put_be64(f, options);
+}
+
+void postcopy_outgoing_state_complete(
+    QEMUFile *f, const uint8_t *buffer, size_t buffer_size)
+{
+    qemu_put_ubyte(f, QEMU_VM_POSTCOPY_SECTION_FULL);
+    qemu_put_be32(f, buffer_size);
+    qemu_put_buffer(f, buffer, buffer_size);
+}
+
+int postcopy_outgoing_ram_save_iterate(QEMUFile *f, void *opaque)
+{
+    qemu_put_be64(f, RAM_SAVE_FLAG_EOS);
+    return 1;
+}
+
+int postcopy_outgoing_ram_save_complete(QEMUFile *f, void *opaque)
+{
+    qemu_put_be64(f, RAM_SAVE_FLAG_EOS);
+    return 0;
+}
+
+/*
+ * return value
+ *   0: continue postcopy mode
+ * > 0: completed postcopy mode.
+ * < 0: error
+ */
+static int postcopy_outgoing_handle_req(PostcopyOutgoingState *s,
+                                        const struct qemu_umem_req *req,
+                                        bool *written)
+{
+    int i;
+    RAMBlock *block;
+
+    DPRINTF("cmd %d state %d\n", req->cmd, s->state);
+    switch(req->cmd) {
+    case QEMU_UMEM_REQ_INIT:
+        /* nothing */
+        break;
+    case QEMU_UMEM_REQ_EOC:
+        /* tell to finish migration. */
+        if (s->state == PO_STATE_ALL_PAGES_SENT) {
+            s->state = PO_STATE_COMPLETED;
+            DPRINTF("-> PO_STATE_COMPLETED\n");
+        } else {
+            s->state = PO_STATE_EOC_RECEIVED;
+            DPRINTF("-> PO_STATE_EOC_RECEIVED\n");
+        }
+        return 1;
+    case QEMU_UMEM_REQ_PAGE:
+        DPRINTF("idstr: %s\n", req->idstr);
+        block = ram_find_block(req->idstr, strlen(req->idstr));
+        if (block == NULL) {
+            return -EINVAL;
+        }
+        s->last_block_read = block;
+        /* fall through */
+    case QEMU_UMEM_REQ_PAGE_CONT:
+        DPRINTF("nr %d\n", req->nr);
+        if (s->mig_buffered_write == NULL) {
+            assert(s->state == PO_STATE_ALL_PAGES_SENT);
+            break;
+        }
+        for (i = 0; i < req->nr; i++) {
+            DPRINTF("offs[%d] 0x%"PRIx64"\n", i, req->pgoffs[i]);
+            int ret = ram_save_page(s->mig_buffered_write, s->last_block_read,
+                                    req->pgoffs[i] << TARGET_PAGE_BITS, false);
+            if (ret > 0) {
+                *written = true;
+            }
+        }
+        break;
+    default:
+        return -EINVAL;
+    }
+    return 0;
+}
+
+static void postcopy_outgoing_close_mig_read(PostcopyOutgoingState *s)
+{
+    if (s->mig_read != NULL) {
+        qemu_set_fd_handler(s->fd_read, NULL, NULL, NULL);
+        qemu_fclose(s->mig_read);
+        s->mig_read = NULL;
+        fd_close(&s->fd_read);
+
+        s->ms->file_read = NULL;
+        s->ms->fd_read = -1;
+    }
+}
+
+static void postcopy_outgoing_completed(PostcopyOutgoingState *s)
+{
+    postcopy_outgoing_close_mig_read(s);
+    s->ms->postcopy = NULL;
+    g_free(s);
+}
+
+static void postcopy_outgoing_recv_handler(void *opaque)
+{
+    PostcopyOutgoingState *s = opaque;
+    bool written = false;
+    int ret = 0;
+
+    assert(s->state == PO_STATE_ACTIVE ||
+           s->state == PO_STATE_ALL_PAGES_SENT);
+
+    do {
+        struct qemu_umem_req req = {.idstr = NULL,
+                                    .pgoffs = NULL};
+
+        ret = postcopy_outgoing_recv_req(s->mig_read, &req);
+        if (ret < 0) {
+            if (ret == -EAGAIN) {
+                ret = 0;
+            }
+            break;
+        }
+
+        /* Even when s->state == PO_STATE_ALL_PAGES_SENT,
+           some request can be received like QEMU_UMEM_REQ_EOC */
+        ret = postcopy_outgoing_handle_req(s, &req, &written);
+        postcopy_outgoing_free_req(&req);
+    } while (ret == 0);
+
+    /*
+     * flush buffered_file.
+     * Although mig_write is rate-limited buffered file, those written pages
+     * are requested on demand by the destination. So forcibly push
+     * those pages ignoring rate limiting
+     */
+    if (written) {
+        qemu_buffered_file_drain(s->mig_buffered_write);
+    }
+
+    if (ret < 0) {
+        switch (s->state) {
+        case PO_STATE_ACTIVE:
+            s->state = PO_STATE_ERROR_RECEIVE;
+            DPRINTF("-> PO_STATE_ERROR_RECEIVE\n");
+            break;
+        case PO_STATE_ALL_PAGES_SENT:
+            s->state = PO_STATE_COMPLETED;
+            DPRINTF("-> PO_STATE_ALL_PAGES_SENT\n");
+            break;
+        default:
+            abort();
+        }
+    }
+    if (s->state == PO_STATE_ERROR_RECEIVE || s->state == PO_STATE_COMPLETED) {
+        postcopy_outgoing_close_mig_read(s);
+    }
+    if (s->state == PO_STATE_COMPLETED) {
+        DPRINTF("PO_STATE_COMPLETED\n");
+        MigrationState *ms = s->ms;
+        postcopy_outgoing_completed(s);
+        migrate_fd_completed(ms);
+    }
+}
+
+PostcopyOutgoingState *postcopy_outgoing_begin(MigrationState *ms)
+{
+    PostcopyOutgoingState *s = g_new(PostcopyOutgoingState, 1);
+    DPRINTF("outgoing begin\n");
+    qemu_buffered_file_drain(ms->file);
+
+    s->ms = ms;
+    s->state = PO_STATE_ACTIVE;
+    s->fd_read = ms->fd_read;
+    s->mig_read = ms->file_read;
+    s->mig_buffered_write = ms->file;
+
+    /* Make sure all dirty bits are set */
+    memory_global_dirty_log_stop();
+    migration_bitmap_init();
+
+    qemu_set_fd_handler(s->fd_read,
+                        &postcopy_outgoing_recv_handler, NULL, s);
+    postcopy_outgoing_recv_handler(s);
+    return s;
+}
+
+static void postcopy_outgoing_ram_all_sent(QEMUFile *f,
+                                           PostcopyOutgoingState *s)
+{
+    assert(s->state == PO_STATE_ACTIVE);
+
+    s->state = PO_STATE_ALL_PAGES_SENT;
+    /* tell incoming side that all pages are sent */
+    qemu_put_be64(f, RAM_SAVE_FLAG_EOS);
+    qemu_buffered_file_drain(f);
+    DPRINTF("sent RAM_SAVE_FLAG_EOS\n");
+    migrate_fd_cleanup(s->ms);
+
+    /* Later migrate_fd_complete() will be called which calls
+     * migrate_fd_cleanup() again. So dummy file is created
+     * for qemu monitor to keep working.
+     */
+    s->ms->file = qemu_fopen_ops(NULL, NULL, NULL, NULL, NULL,
+                                 NULL, NULL);
+    s->mig_buffered_write = NULL;
+
+    migration_bitmap_free();
+}
+
+int postcopy_outgoing_ram_save_background(QEMUFile *f, void *postcopy)
+{
+    PostcopyOutgoingState *s = postcopy;
+#define MAX_WAIT        50      /* stolen from ram_save_iterate() */
+    double t0;
+    int i;
+
+    assert(s->state == PO_STATE_ACTIVE ||
+           s->state == PO_STATE_EOC_RECEIVED ||
+           s->state == PO_STATE_ERROR_RECEIVE);
+
+    switch (s->state) {
+    case PO_STATE_ACTIVE:
+        /* nothing. processed below */
+        break;
+    case PO_STATE_EOC_RECEIVED:
+        qemu_put_be64(f, RAM_SAVE_FLAG_EOS);
+        s->state = PO_STATE_COMPLETED;
+        postcopy_outgoing_completed(s);
+        DPRINTF("PO_STATE_COMPLETED\n");
+        return 1;
+    case PO_STATE_ERROR_RECEIVE:
+        postcopy_outgoing_completed(s);
+        DPRINTF("PO_STATE_ERROR_RECEIVE\n");
+        return -1;
+    default:
+        abort();
+    }
+
+    DPRINTF("outgoing background state: %d\n", s->state);
+    i = 0;
+    t0 = qemu_get_clock_ns(rt_clock);
+    while (qemu_file_rate_limit(f) == 0) {
+        int nfds = -1;
+        fd_set readfds;
+        struct timeval timeout = {.tv_sec = 0, .tv_usec = 0};
+        int ret;
+
+        if (ram_save_block(f, false) == 0) { /* no more blocks */
+            DPRINTF("outgoing background all sent\n");
+            assert(s->state == PO_STATE_ACTIVE);
+            postcopy_outgoing_ram_all_sent(f, s);
+            return 0;
+        }
+
+        FD_ZERO(&readfds);
+        set_fd(s->fd_read, &readfds, &nfds);
+        ret = select(nfds + 1, &readfds, NULL, NULL, &timeout);
+        if (ret >= 0 && FD_ISSET(s->fd_read, &readfds)) {
+            /* page request is pending */
+            DPRINTF("pending request\n");
+            break;
+        }
+
+        /* stolen from ram_save_iterate() */
+        if ((i & 63) == 0) {
+            int64_t t1 = (qemu_get_clock_ns(rt_clock) - t0) / 1000000;
+            if (t1 > MAX_WAIT) {
+                DPRINTF("too long %"PRIu64"\n", t1);
+                break;
+            }
+        }
+        i++;
+    }
+
+    return 0;
+}
 
 /***************************************************************************
  * incoming part
