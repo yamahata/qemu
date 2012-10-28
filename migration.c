@@ -386,6 +386,7 @@ void migrate_del_blocker(Error *reason)
 
 void qmp_migrate(const char *uri, bool has_blk, bool blk,
                  bool has_inc, bool inc, bool has_detach, bool detach,
+                 bool has_precopy_count, int64_t precopy_count,
                  bool has_forward, int64_t forward,
                  bool has_backward, int64_t backward,
                  Error **errp)
@@ -397,6 +398,7 @@ void qmp_migrate(const char *uri, bool has_blk, bool blk,
 
     params.blk = blk;
     params.shared = inc;
+    params.precopy_count = precopy_count,
     params.prefault_forward = 0;
     if (has_forward) {
         if (forward < 0) {

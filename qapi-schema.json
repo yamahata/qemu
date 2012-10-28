@@ -2400,13 +2400,15 @@
 # @detach: this argument exists only for compatibility reasons and
 #          is ignored by QEMU
 #
+# @precopy_count: #optional the number of loops of precopy when postcopy
+#
 # Returns: nothing on success
 #
 # Since: 0.14.0
 ##
 { 'command': 'migrate',
   'data': {'uri': 'str', '*blk': 'bool', '*inc': 'bool', '*detach': 'bool',
-           '*forward': 'int', '*backward': 'int' } }
+           '*precopy_count': 'int', '*forward': 'int', '*backward': 'int'} }
 
 # @xen-save-devices-state:
 #

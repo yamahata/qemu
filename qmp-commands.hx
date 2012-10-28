@@ -611,7 +611,7 @@ EQMP
 
     {
         .name       = "migrate",
-        .args_type  = "detach:-d,blk:-b,inc:-i,uri:s",
+        .args_type  = "detach:-d,blk:-b,inc:-i,uri:s,precopy_cout:i?",
         .mhandler.cmd_new = qmp_marshal_input_migrate,
     },
 
