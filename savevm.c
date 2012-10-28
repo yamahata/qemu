@@ -1647,6 +1647,12 @@ int qemu_savevm_state_begin(QEMUFile *f,
     qemu_put_be32(f, QEMU_VM_FILE_MAGIC);
     qemu_put_be32(f, QEMU_VM_FILE_VERSION);
 
+    if (params->postcopy) {
+        /* tell this is postcopy */
+        qemu_put_byte(f, QEMU_VM_POSTCOPY);
+        postcopy_outgoing_state_begin(f);
+    }
+
     QTAILQ_FOREACH(se, &savevm_handlers, entry) {
         int len;
 
@@ -1734,8 +1740,10 @@ int qemu_savevm_state_iterate(QEMUFile *f)
     return ret;
 }
 
-int qemu_savevm_state_complete(QEMUFile *f)
+int qemu_savevm_state_complete(QEMUFile *f, const MigrationParams *params)
 {
+    QEMUFile *orig_f = NULL;
+    QEMUFileBuf *buf_file = NULL;
     SaveStateEntry *se;
     int ret;
 
@@ -1762,6 +1770,20 @@ int qemu_savevm_state_complete(QEMUFile *f)
         }
     }
 
+    if (params->postcopy) {
+        /* VMStateDescription:pre/post_load and
+         * cpu_sychronize_all_post_init() may fault on guest RAM.
+         * (MSR_KVM_WALL_CLOCK, MSR_KVM_SYSTEM_TIME)
+         * postcopy threads needs to be created before the fault.
+         *
+         * This is hacky, but it's because size of section/state structure
+         * can't be easily determined without actual loading.
+         */
+        orig_f = f;
+        buf_file = qemu_fopen_buf_write();
+        f = buf_file->file;
+    }
+
     QTAILQ_FOREACH(se, &savevm_handlers, entry) {
         int len;
 
@@ -1786,6 +1808,15 @@ int qemu_savevm_state_complete(QEMUFile *f)
     }
 
     qemu_put_byte(f, QEMU_VM_EOF);
+
+    if (params->postcopy) {
+        qemu_fflush(f);
+        qemu_put_byte(orig_f, QEMU_VM_POSTCOPY);
+        postcopy_outgoing_state_complete(
+            orig_f, buf_file->buffer, buf_file->buffer_size);
+        qemu_fclose(f);
+        f = orig_f;
+    }
 
     return qemu_file_get_error(f);
 }
@@ -1825,7 +1856,7 @@ static int qemu_savevm_state(QEMUFile *f)
             goto out;
     } while (ret == 0);
 
-    ret = qemu_savevm_state_complete(f);
+    ret = qemu_savevm_state_complete(f, &params);
 
 out:
     if (ret == 0) {
