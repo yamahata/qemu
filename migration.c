@@ -41,6 +41,11 @@ enum {
     MIG_STATE_COMPLETED,
 };
 
+enum {
+    MIG_SUBSTATE_PRECOPY,
+    MIG_SUBSTATE_POSTCOPY,
+};
+
 #define MAX_THROTTLE  (32 << 20)      /* Migration speed throttling */
 
 /* Migration XBZRLE default cache size */
@@ -328,6 +333,17 @@ void migrate_fd_put_ready(MigrationState *s)
         return;
     }
 
+    if (s->substate == MIG_SUBSTATE_POSTCOPY) {
+        /* PRINTF("postcopy background\n"); */
+        ret = postcopy_outgoing_ram_save_background(s->file, s->postcopy);
+        if (ret > 0) {
+            migrate_fd_completed(s);
+        } else if (ret < 0) {
+            migrate_fd_error(s);
+        }
+        return;
+    }
+
     DPRINTF("iterate\n");
     ret = qemu_savevm_state_iterate(s->file);
     if (ret < 0) {
@@ -341,7 +357,20 @@ void migrate_fd_put_ready(MigrationState *s)
         qemu_system_wakeup_request(QEMU_WAKEUP_REASON_OTHER);
         vm_stop_force_state(RUN_STATE_FINISH_MIGRATE);
 
-        if (qemu_savevm_state_complete(s->file) < 0) {
+        if (s->params.postcopy) {
+            if (qemu_savevm_state_complete(s->file, &s->params) < 0) {
+                migrate_fd_error(s);
+                if (old_vm_running) {
+                    vm_start();
+                }
+                return;
+            }
+            s->substate = MIG_SUBSTATE_POSTCOPY;
+            s->postcopy = postcopy_outgoing_begin(s);
+            return;
+        }
+
+        if (qemu_savevm_state_complete(s->file, &s->params) < 0) {
             migrate_fd_error(s);
         } else {
             migrate_fd_completed(s);
@@ -431,6 +460,7 @@ void migrate_fd_connect(MigrationState *s)
     int ret;
 
     s->state = MIG_STATE_ACTIVE;
+    s->substate = MIG_SUBSTATE_PRECOPY;
     s->file = qemu_fopen_ops_buffered(s);
 
     DPRINTF("beginning savevm\n");

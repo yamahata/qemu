@@ -71,12 +71,20 @@ static void unix_wait_for_connect(void *opaque)
 
     qemu_set_fd_handler2(s->fd, NULL, NULL, NULL, NULL);
 
-    if (val == 0)
+    if (val == 0) {
+        ret = postcopy_outgoing_create_read_socket(s);
+        if (ret < 0) {
+            goto error_out;
+        }
         migrate_fd_connect(s);
-    else {
+    } else {
         DPRINTF("error connecting %d\n", val);
-        migrate_fd_error(s);
+        goto error_out;
     }
+    return;
+
+error_out:
+    migrate_fd_error(s);
 }
 
 int unix_start_outgoing_migration(MigrationState *s, const char *path)
@@ -111,11 +119,19 @@ int unix_start_outgoing_migration(MigrationState *s, const char *path)
 
     if (ret < 0) {
         DPRINTF("connect failed\n");
-        migrate_fd_error(s);
-        return ret;
+        goto error_out;
+    }
+
+    ret = postcopy_outgoing_create_read_socket(s);
+    if (ret < 0) {
+        goto error_out;
     }
     migrate_fd_connect(s);
     return 0;
+
+error_out:
+    migrate_fd_error(s);
+    return ret;
 }
 
 static void unix_accept_incoming_migration(void *opaque)
