@@ -81,7 +81,7 @@ bool qemu_savevm_state_blocked(Error **errp);
 int qemu_savevm_state_begin(QEMUFile *f,
                             const MigrationParams *params);
 int qemu_savevm_state_iterate(QEMUFile *f);
-int qemu_savevm_state_complete(QEMUFile *f);
+int qemu_savevm_state_complete(QEMUFile *f, const MigrationParams *params);
 void qemu_savevm_state_cancel(QEMUFile *f);
 int qemu_loadvm_state(QEMUFile *f);
 
