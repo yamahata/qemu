@@ -57,6 +57,7 @@ struct MigrationState
     int fd_read;
     QEMUFile *file_read;        /* connection from the detination */
     void *postcopy;
+    int precopy_count;
 };
 
 void process_incoming_migration(QEMUFile *f);
