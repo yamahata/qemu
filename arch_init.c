@@ -689,7 +689,7 @@ static int ram_save_setup(QEMUFile *f, void *opaque)
     return 0;
 }
 
-static int ram_save_iterate(QEMUFile *f, void *opaque)
+int ram_save_iterate(QEMUFile *f)
 {
     int ret;
     int i;
@@ -738,6 +738,11 @@ static int ram_save_iterate(QEMUFile *f, void *opaque)
     bytes_transferred += 8;
 
     return sent? 1: 0;
+}
+
+static int ram_save_iterate_bwidth(QEMUFile *f, void *opaque)
+{
+    return ram_save_iterate(f);
 }
 
 static int ram_save_complete(QEMUFile *f, void *opaque)
@@ -992,7 +997,7 @@ static void ram_save_set_params(const MigrationParams *params, void *opaque)
         savevm_ram_handlers.save_live_pending =
             postcopy_outgoing_ram_save_pending;
     } else {
-        savevm_ram_handlers.save_live_iterate = ram_save_iterate;
+        savevm_ram_handlers.save_live_iterate = ram_save_iterate_bwidth;
         savevm_ram_handlers.save_live_complete = ram_save_complete;
         savevm_ram_handlers.save_live_pending = ram_save_pending;
     }
@@ -1001,7 +1006,7 @@ static void ram_save_set_params(const MigrationParams *params, void *opaque)
 SaveVMHandlers savevm_ram_handlers = {
     .set_params = ram_save_set_params,
     .save_live_setup = ram_save_setup,
-    .save_live_iterate = ram_save_iterate,
+    .save_live_iterate = ram_save_iterate_bwidth,
     .save_live_complete = ram_save_complete,
     .save_live_pending = ram_save_pending,
     .load_state = ram_load_precopy,
