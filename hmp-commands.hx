@@ -878,13 +878,14 @@ ETEXI
     {
         .name       = "migrate",
         .args_type  = "detach:-d,blk:-b,inc:-i,uri:s,"
-	              "forward:i?,backward:i?",
-        .params     = "[-d] [-b] [-i] uri [forward] [backword]",
+	              "precopy_count:i?,forward:i?,backward:i?",
+        .params     = "[-d] [-b] [-i] uri [precopy_count] [forward] [backword]",
         .help       = "migrate to URI (using -d to not wait for completion)"
 		      "\n\t\t\t -b for migration without shared storage with"
 		      " full copy of disk\n\t\t\t -i for migration without "
 		      "shared storage with incremental copy of disk "
 		      "(base image shared between src and destination)"
+		      "\n\t\t\tprecopy_count: loop of precopy when postcopy"
 		      "\n\t\t\tforward: the number of pages to "
 		      "forward-prefault when postcopy (default 0)"
 		      "\n\t\t\tbackward: the number of pages to "
@@ -894,7 +895,7 @@ ETEXI
 
 
 STEXI
-@item migrate [-d] [-b] [-i] @var{uri} @var{forward} @var{backward}
+@item migrate [-d] [-b] [-i] @var{uri} @var{precopy_count} @var{forward} @var{backward}
 @findex migrate
 Migrate to @var{uri} (using -d to not wait for completion).
 	-b for migration with full copy of disk
