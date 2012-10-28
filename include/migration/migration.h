@@ -30,6 +30,7 @@ struct MigrationParams {
 };
 
 typedef struct MigrationState MigrationState;
+typedef struct PostcopyOutgoingState PostcopyOutgoingState;
 
 struct MigrationState
 {
@@ -50,6 +51,11 @@ struct MigrationState
     int64_t dirty_bytes_rate;
     bool enabled_capabilities[MIGRATION_CAPABILITY_MAX];
     int64_t xbzrle_cache_size;
+
+    /* for postcopy */
+    int substate;              /* precopy or postcopy */
+    QEMUFile *file_read;        /* connection from the detination */
+    PostcopyOutgoingState *postcopy;
 };
 
 struct MigrationRateLimitStat
@@ -154,6 +160,20 @@ int migrate_use_xbzrle(void);
 int64_t migrate_xbzrle_cache_size(void);
 
 int64_t xbzrle_cache_resize(int64_t new_size);
+
+/* For outgoing postcopy */
+int postcopy_outgoing_create_read_socket(MigrationState *s, int fd);
+void postcopy_outgoing_state_begin(QEMUFile *f);
+void postcopy_outgoing_state_complete(
+    QEMUFile *f, const uint8_t *buffer, size_t buffer_size);
+int postcopy_outgoing_ram_save_iterate(QEMUFile *f, void *opaque);
+int postcopy_outgoing_ram_save_complete(QEMUFile *f, void *opaque);
+uint64_t postcopy_outgoing_ram_save_pending(QEMUFile *f, void *opaque,
+                                            uint64_t max_size);
+
+PostcopyOutgoingState *postcopy_outgoing_begin(MigrationState *s);
+void postcopy_outgoing_cleanup(MigrationState *ms);
+int postcopy_outgoing(MigrationState *s, MigrationRateLimitStat *rlstat);
 
 /* For incoming postcopy */
 int postcopy_incoming_loadvm_state(QEMUFile *f, QEMUFile **buf_file);

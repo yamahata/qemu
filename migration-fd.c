@@ -32,8 +32,15 @@
 
 void fd_start_outgoing_migration(MigrationState *s, const char *fdname, Error **errp)
 {
+    int ret;
     int fd = monitor_get_fd(cur_mon, fdname, errp);
     if (fd == -1) {
+        return;
+    }
+    ret = postcopy_outgoing_create_read_socket(s, fd);
+    if (ret < 0) {
+        close(fd);
+        error_setg_errno(errp, -ret, "failed to create read socket");
         return;
     }
     s->file = qemu_fdopen(fd, "wb");

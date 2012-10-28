@@ -639,6 +639,7 @@ static void reset_ram_globals(void)
 
 static int ram_save_setup(QEMUFile *f, void *opaque)
 {
+    const MigrationParams *params = &migrate_get_current()->params;
     RAMBlock *block;
 
     migration_bitmap_init();
@@ -663,8 +664,10 @@ static int ram_save_setup(QEMUFile *f, void *opaque)
     bytes_transferred = 0;
     reset_ram_globals();
 
-    memory_global_dirty_log_start();
-    migration_bitmap_sync();
+    if (!params->postcopy) {
+        memory_global_dirty_log_start();
+        migration_bitmap_sync();
+    }
     qemu_mutex_unlock_iothread();
 
     qemu_put_be64(f, ram_bytes_total() | RAM_SAVE_FLAG_MEM_SIZE);
@@ -967,7 +970,24 @@ done:
     return ret;
 }
 
+static void ram_save_set_params(const MigrationParams *params, void *opaque)
+{
+    if (params->postcopy) {
+        savevm_ram_handlers.save_live_iterate =
+            postcopy_outgoing_ram_save_iterate;
+        savevm_ram_handlers.save_live_complete =
+            postcopy_outgoing_ram_save_complete;
+        savevm_ram_handlers.save_live_pending =
+            postcopy_outgoing_ram_save_pending;
+    } else {
+        savevm_ram_handlers.save_live_iterate = ram_save_iterate;
+        savevm_ram_handlers.save_live_complete = ram_save_complete;
+        savevm_ram_handlers.save_live_pending = ram_save_pending;
+    }
+}
+
 SaveVMHandlers savevm_ram_handlers = {
+    .set_params = ram_save_set_params,
     .save_live_setup = ram_save_setup,
     .save_live_iterate = ram_save_iterate,
     .save_live_complete = ram_save_complete,

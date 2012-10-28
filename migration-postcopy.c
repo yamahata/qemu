@@ -175,11 +175,467 @@ static void postcopy_incoming_send_req(QEMUFile *f, const QEMUUMemReq *req)
     }
 }
 
+static int postcopy_outgoing_recv_req_idstr(QEMUFile *f,
+                                            QEMUUMemReq *req, size_t *offset)
+{
+    int ret;
+
+    req->len = qemu_peek_byte(f, *offset);
+    *offset += 1;
+    if (req->len == 0) {
+        return -EAGAIN;
+    }
+    ret = qemu_peek_buffer(f, (uint8_t*)req->idstr, req->len, *offset);
+    *offset += ret;
+    if (ret != req->len) {
+        return -EAGAIN;
+    }
+    req->idstr[req->len] = 0;
+    return 0;
+}
+
+static int postcopy_outgoing_recv_req_pgoffs(QEMUFile *f,
+                                             QEMUUMemReq *req, size_t *offset)
+{
+    int ret;
+    uint32_t be32;
+    uint32_t i;
+
+    ret = qemu_peek_buffer(f, (uint8_t*)&be32, sizeof(be32), *offset);
+    *offset += sizeof(be32);
+    if (ret != sizeof(be32)) {
+        return -EAGAIN;
+    }
+
+    req->nr = be32_to_cpu(be32);
+    req->pgoffs = g_new(uint64_t, req->nr);
+    for (i = 0; i < req->nr; i++) {
+        uint64_t be64;
+        ret = qemu_peek_buffer(f, (uint8_t*)&be64, sizeof(be64), *offset);
+        *offset += sizeof(be64);
+        if (ret != sizeof(be64)) {
+            g_free(req->pgoffs);
+            req->pgoffs = NULL;
+            return -EAGAIN;
+        }
+        req->pgoffs[i] = be64_to_cpu(be64);
+    }
+    return 0;
+}
+
+static int postcopy_outgoing_recv_req(QEMUFile *f, QEMUUMemReq *req)
+{
+    int size;
+    int ret;
+    size_t offset = 0;
+
+    size = qemu_peek_buffer(f, (uint8_t*)&req->cmd, 1, offset);
+    if (size <= 0) {
+        return -EAGAIN;
+    }
+    offset += 1;
+
+    switch (req->cmd) {
+    case QEMU_UMEM_REQ_INIT:
+    case QEMU_UMEM_REQ_EOC:
+        /* nothing */
+        break;
+    case QEMU_UMEM_REQ_PAGE:
+        ret = postcopy_outgoing_recv_req_idstr(f, req, &offset);
+        if (ret < 0) {
+            return ret;
+        }
+        ret = postcopy_outgoing_recv_req_pgoffs(f, req, &offset);
+        if (ret < 0) {
+            return ret;
+        }
+        break;
+    case QEMU_UMEM_REQ_PAGE_CONT:
+        ret = postcopy_outgoing_recv_req_pgoffs(f, req, &offset);
+        if (ret < 0) {
+            return ret;
+        }
+        break;
+    default:
+        abort();
+        break;
+    }
+    qemu_file_skip(f, offset);
+    DPRINTF("cmd %d\n", req->cmd);
+    return 0;
+}
+
+static void postcopy_outgoing_free_req(QEMUUMemReq *req)
+{
+    g_free(req->pgoffs);
+}
+
 /***************************************************************************
  * QEMU_VM_POSTCOPY section subtype
  */
 #define QEMU_VM_POSTCOPY_INIT           0
 #define QEMU_VM_POSTCOPY_SECTION_FULL   1
+
+/***************************************************************************
+ * outgoing part
+ */
+
+enum POState {
+    PO_STATE_ERROR_RECEIVE,
+    PO_STATE_ACTIVE,
+    PO_STATE_EOC_RECEIVED,
+    PO_STATE_ALL_PAGES_SENT,
+    PO_STATE_COMPLETED,
+};
+typedef enum POState POState;
+
+struct PostcopyOutgoingState {
+    POState state;
+    RAMBlock *last_block_read;
+};
+
+int postcopy_outgoing_create_read_socket(MigrationState *s, int fd)
+{
+    int flags;
+    int fd_read;
+
+    if (!s->params.postcopy) {
+        return 0;
+    }
+
+    flags = fcntl(fd, F_GETFL);
+    if ((flags & O_ACCMODE) != O_RDWR) {
+        return -ENOSYS;
+    }
+
+    fd_read = dup(fd);
+    if (fd_read == -1) {
+        int ret = -errno;
+        perror("dup");
+        return ret;
+    }
+    s->file_read = qemu_fopen_socket(fd_read, "rb");
+    if (s->file_read == NULL) {
+        close(fd_read);
+        return -EINVAL;
+    }
+    qemu_file_set_thread(s->file_read, true);
+    return 0;
+}
+
+void postcopy_outgoing_state_begin(QEMUFile *f)
+{
+    uint64_t options = 0;
+    qemu_put_ubyte(f, QEMU_VM_POSTCOPY_INIT);
+    qemu_put_be32(f, sizeof(options));
+    qemu_put_be64(f, options);
+}
+
+void postcopy_outgoing_state_complete(
+    QEMUFile *f, const uint8_t *buffer, size_t buffer_size)
+{
+    qemu_put_ubyte(f, QEMU_VM_POSTCOPY_SECTION_FULL);
+    qemu_put_be32(f, buffer_size);
+    qemu_put_buffer(f, buffer, buffer_size);
+}
+
+int postcopy_outgoing_ram_save_iterate(QEMUFile *f, void *opaque)
+{
+    qemu_put_be64(f, RAM_SAVE_FLAG_EOS);
+    return 1;
+}
+
+int postcopy_outgoing_ram_save_complete(QEMUFile *f, void *opaque)
+{
+    ram_save_bulk_stage_done();
+    qemu_put_be64(f, RAM_SAVE_FLAG_EOS);
+    ram_save_page_reset();
+    return 0;
+}
+
+uint64_t postcopy_outgoing_ram_save_pending(QEMUFile *f, void *opaque,
+                                            uint64_t max_size)
+{
+    return 0;
+}
+
+/*
+ * return value
+ *   0: continue postcopy mode
+ * > 0: completed postcopy mode.
+ * < 0: error
+ */
+static int postcopy_outgoing_handle_req(QEMUFile *f, PostcopyOutgoingState *s,
+                                        const QEMUUMemReq *req)
+{
+    int i;
+    RAMBlock *block;
+
+    DPRINTF("cmd %d state %d\n", req->cmd, s->state);
+    switch(req->cmd) {
+    case QEMU_UMEM_REQ_INIT:
+        /* nothing */
+        break;
+    case QEMU_UMEM_REQ_EOC:
+        /* tell to finish migration. */
+        if (s->state == PO_STATE_ALL_PAGES_SENT) {
+            s->state = PO_STATE_COMPLETED;
+            DPRINTF("-> PO_STATE_COMPLETED\n");
+        } else {
+            s->state = PO_STATE_EOC_RECEIVED;
+            DPRINTF("-> PO_STATE_EOC_RECEIVED\n");
+        }
+        return 1;
+    case QEMU_UMEM_REQ_PAGE:
+        DPRINTF("idstr: %s\n", req->idstr);
+        block = ram_find_block(req->idstr, strlen(req->idstr));
+        if (block == NULL) {
+            return -EINVAL;
+        }
+        s->last_block_read = block;
+        /* fall through */
+    case QEMU_UMEM_REQ_PAGE_CONT:
+        DPRINTF("nr %d\n", req->nr);
+        if (s->state == PO_STATE_ALL_PAGES_SENT) {
+            break;
+        }
+        for (i = 0; i < req->nr; i++) {
+            DPRINTF("offs[%d] 0x%"PRIx64"\n", i, req->pgoffs[i]);
+            ram_save_page(f, s->last_block_read,
+                          req->pgoffs[i] << TARGET_PAGE_BITS);
+        }
+        break;
+    default:
+        return -EINVAL;
+    }
+    return 0;
+}
+
+static void postcopy_outgoing_recv_handler(MigrationState *ms)
+{
+    PostcopyOutgoingState *s = ms->postcopy;
+    QEMUFile *file_write = ms->file;
+    QEMUFile *file_read = ms->file_read;
+    int readfd = qemu_get_fd(file_read);
+    int ret = 0;
+
+    assert(s->state == PO_STATE_ACTIVE ||
+           s->state == PO_STATE_ALL_PAGES_SENT);
+
+    do {
+        QEMUUMemReq req = {.pgoffs = NULL};
+
+        qemu_set_nonblock(readfd);
+        ret = postcopy_outgoing_recv_req(file_read, &req);
+        qemu_set_block(readfd);
+        if (ret < 0) {
+            if (ret == -EAGAIN) {
+                ret = 0;
+            }
+            break;
+        }
+
+        /* Even when s->state == PO_STATE_ALL_PAGES_SENT,
+           some request can be received like QEMU_UMEM_REQ_EOC */
+        ret = postcopy_outgoing_handle_req(file_write, s, &req);
+        postcopy_outgoing_free_req(&req);
+    } while (ret == 0);
+    qemu_fflush(file_write);
+
+    if (ret < 0) {
+        switch (s->state) {
+        case PO_STATE_ACTIVE:
+            s->state = PO_STATE_ERROR_RECEIVE;
+            DPRINTF("-> PO_STATE_ERROR_RECEIVE\n");
+            break;
+        case PO_STATE_ALL_PAGES_SENT:
+            s->state = PO_STATE_COMPLETED;
+            DPRINTF("-> PO_STATE_ALL_PAGES_SENT\n");
+            break;
+        default:
+            abort();
+        }
+    }
+    if (s->state == PO_STATE_COMPLETED) {
+        DPRINTF("PO_STATE_COMPLETED\n");
+    }
+}
+
+PostcopyOutgoingState *postcopy_outgoing_begin(MigrationState *ms)
+{
+    PostcopyOutgoingState *s = g_new(PostcopyOutgoingState, 1);
+    DPRINTF("outgoing begin\n");
+    s->state = PO_STATE_ACTIVE;
+    s->last_block_read = NULL;
+
+    qemu_fflush(ms->file);
+    qemu_file_reset_rate_limit(ms->file);
+    return s;
+}
+
+void postcopy_outgoing_cleanup(MigrationState *ms)
+{
+    migration_bitmap_free();
+    if (!ms->params.postcopy) {
+        return;
+    }
+    qemu_fclose(ms->file_read);
+    ms->file_read = NULL;
+    g_free(ms->postcopy);
+    ms->postcopy = NULL;
+}
+
+static void postcopy_outgoing_ram_all_sent(QEMUFile *f,
+                                           PostcopyOutgoingState *s)
+{
+    assert(s->state == PO_STATE_ACTIVE);
+
+    s->state = PO_STATE_ALL_PAGES_SENT;
+    /* tell incoming side that all pages are sent */
+    qemu_put_be64(f, RAM_SAVE_FLAG_EOS);
+    qemu_fflush(f);
+    DPRINTF("sent RAM_SAVE_FLAG_EOS\n");
+}
+
+static int postcopy_outgoing_ram_save_background(
+    MigrationState *ms, MigrationRateLimitStat *rlstat)
+{
+    PostcopyOutgoingState *s = ms->postcopy;
+    QEMUFile *f = ms->file;
+
+    assert(s->state == PO_STATE_ACTIVE ||
+           s->state == PO_STATE_EOC_RECEIVED ||
+           s->state == PO_STATE_ERROR_RECEIVE);
+
+    switch (s->state) {
+    case PO_STATE_ACTIVE:
+        /* nothing. processed below */
+        break;
+    case PO_STATE_EOC_RECEIVED:
+        qemu_put_be64(f, RAM_SAVE_FLAG_EOS);
+        s->state = PO_STATE_COMPLETED;
+        DPRINTF("PO_STATE_COMPLETED\n");
+        return 0;
+    case PO_STATE_ERROR_RECEIVE:
+        DPRINTF("PO_STATE_ERROR_RECEIVE\n");
+        return -1;
+    default:
+        abort();
+    }
+
+    while (qemu_file_rate_limit(f) == 0) {
+        int nfds = -1;
+        int readfd = qemu_get_fd(ms->file_read);
+        int writefd = qemu_get_fd(f);
+        fd_set readfds;
+        fd_set writefds;
+        struct timeval timeout = {.tv_sec = 0, .tv_usec = 0};
+        int ret;
+
+        if (!ram_save_block(f, true, true)) { /* no more blocks */
+            DPRINTF("outgoing background all sent\n");
+            assert(s->state == PO_STATE_ACTIVE);
+            postcopy_outgoing_ram_all_sent(f, s);
+            return 0;
+        }
+
+        migration_update_rate_limit_stat(ms, rlstat,
+                                         qemu_get_clock_ms(rt_clock));
+
+        /* If page request is pending, try to process it early. */
+        FD_ZERO(&readfds);
+        set_fd(readfd, &readfds, &nfds);
+        /* We don't want to block on writing so that we can accept
+         * page requests as early as possible. */
+        FD_ZERO(&writefds);
+        set_fd(writefd, &writefds, &nfds);
+        ret = select(nfds + 1, &readfds, &writefds, NULL, &timeout);
+        if (ret >= 0 && (FD_ISSET(readfd, &readfds) ||
+                         !FD_ISSET(writefd, &writefds))) {
+            DPRINTF("pending request\n");
+            break;
+        }
+    }
+
+    return 0;
+}
+
+static int postcopy_outgoing_loop(MigrationState *ms,
+                                  MigrationRateLimitStat *rlstat)
+{
+    /* XXX: threading? */
+    PostcopyOutgoingState *s = ms->postcopy;
+    int ret = 0;
+    int nfds = -1;
+    int readfd = qemu_get_fd(ms->file_read);
+    int writefd = qemu_get_fd(ms->file);
+    fd_set readfds;
+    fd_set writefds;
+    struct timeval *timeoutp = &(struct timeval) {
+        .tv_sec = 0,
+        .tv_usec = 0,
+    };
+
+    FD_ZERO(&readfds);
+    if (s->state == PO_STATE_ACTIVE || s->state == PO_STATE_ALL_PAGES_SENT) {
+        set_fd(readfd, &readfds, &nfds);
+    }
+    FD_ZERO(&writefds);
+    if (s->state == PO_STATE_ACTIVE || s->state == PO_STATE_EOC_RECEIVED) {
+        if (qemu_file_rate_limit(ms->file)) {
+            int64_t current_time = qemu_get_clock_ms(rt_clock);
+            int64_t sleep_ms = migration_sleep_time_ms(rlstat, current_time);
+            timeoutp->tv_sec = sleep_ms / 1000;
+            timeoutp->tv_usec = (sleep_ms % 1000) * 1000;
+        } else {
+            set_fd(writefd, &writefds, &nfds);
+            timeoutp = NULL;
+        }
+    } else {
+        timeoutp = NULL;
+    }
+    ret = select(nfds + 1, &readfds, &writefds, NULL, timeoutp);
+    if (ret == -1) {
+        if (errno == EINTR) {
+            return 0;
+        }
+        return ret;
+    }
+    if (FD_ISSET(readfd, &readfds)) {
+        postcopy_outgoing_recv_handler(ms);
+        migration_update_rate_limit_stat(ms, rlstat,
+                                         qemu_get_clock_ms(rt_clock));
+        return 0;
+    }
+    if (FD_ISSET(writefd, &writefds)) {
+        return postcopy_outgoing_ram_save_background(ms, rlstat);
+    }
+    migration_update_rate_limit_stat(ms, rlstat,
+                                     qemu_get_clock_ms(rt_clock));
+    return 0;
+}
+
+int postcopy_outgoing(MigrationState *ms, MigrationRateLimitStat *rlstat)
+{
+    PostcopyOutgoingState *s = ms->postcopy;
+    int ret = 0;
+
+    DPRINTF("postcopy outgoing\n");
+    while (s->state != PO_STATE_ERROR_RECEIVE &&
+           s->state != PO_STATE_COMPLETED) {
+        ret = postcopy_outgoing_loop(ms, rlstat);
+        if (qemu_file_get_error(ms->file_read)) {
+            qemu_file_set_error(ms->file, qemu_file_get_error(ms->file_read));
+        }
+        if (qemu_file_get_error(ms->file)) {
+            ret = -1;
+        }
+        if (ret < 0) {
+            break;
+        }
+    }
+    return ret;
+}
 
 /***************************************************************************
  * incoming part

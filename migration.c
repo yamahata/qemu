@@ -43,6 +43,11 @@ enum {
     MIG_STATE_COMPLETED,
 };
 
+enum {
+    MIG_SUBSTATE_PRECOPY,
+    MIG_SUBSTATE_POSTCOPY,
+};
+
 #define MAX_THROTTLE  (32 << 20)      /* Migration speed throttling */
 
 /* Amount of time to allocate to each "chunk" of bandwidth-throttled
@@ -282,6 +287,7 @@ static void migrate_fd_cleanup(void *opaque)
 
         qemu_fclose(s->file);
         s->file = NULL;
+        postcopy_outgoing_cleanup(s);
     }
 
     assert(s->state != MIG_STATE_ACTIVE);
@@ -563,7 +569,8 @@ static void *migration_thread(void *opaque)
     DPRINTF("beginning savevm\n");
     qemu_savevm_state_begin(s->file, &s->params);
 
-    while (s->state == MIG_STATE_ACTIVE) {
+    while (s->state == MIG_STATE_ACTIVE &&
+           s->substate == MIG_SUBSTATE_PRECOPY) {
         int64_t current_time;
         uint64_t pending_size;
 
@@ -585,10 +592,16 @@ static void *migration_thread(void *opaque)
 
                 ret = vm_stop_force_state(RUN_STATE_FINISH_MIGRATE);
                 if (ret >= 0) {
-                    qemu_file_set_rate_limit(s->file, INT_MAX);
-                    qemu_savevm_state_complete(s->file);
+                    if (!s->params.postcopy) {
+                        qemu_file_set_rate_limit(s->file, INT_MAX);
+                    }
+                    qemu_savevm_state_complete(s->file, &s->params);
                 }
                 qemu_mutex_unlock_iothread();
+                if (s->params.postcopy) {
+                    s->substate = MIG_SUBSTATE_POSTCOPY;
+                    s->postcopy = postcopy_outgoing_begin(s);
+                }
 
                 if (ret < 0) {
                     migrate_finish_set_state(s, MIG_STATE_ERROR);
@@ -596,7 +609,9 @@ static void *migration_thread(void *opaque)
                 }
 
                 if (!qemu_file_get_error(s->file)) {
-                    migrate_finish_set_state(s, MIG_STATE_COMPLETED);
+                    if (!s->params.postcopy) {
+                        migrate_finish_set_state(s, MIG_STATE_COMPLETED);
+                    }
                     break;
                 }
             }
@@ -614,15 +629,39 @@ static void *migration_thread(void *opaque)
         }
     }
 
+    if (s->params.postcopy && s->state == MIG_STATE_ACTIVE) {
+        int ret;
+        assert(s->substate == MIG_SUBSTATE_POSTCOPY);
+        qemu_mutex_lock_iothread();
+        s->downtime = qemu_get_clock_ms(rt_clock) - start_time;
+        qemu_mutex_unlock_iothread();
+
+        ret = postcopy_outgoing(s, &rlstat);
+        if (ret < 0) {
+            migrate_finish_set_state(s, MIG_STATE_ERROR);
+        }
+        if (qemu_file_get_error(s->file)) {
+            migrate_finish_set_state(s, MIG_STATE_ERROR);
+        } else if (ret == 0) {
+            migrate_finish_set_state(s, MIG_STATE_COMPLETED);
+        }
+    }
+
     qemu_mutex_lock_iothread();
     if (s->state == MIG_STATE_COMPLETED) {
         int64_t end_time = qemu_get_clock_ms(rt_clock);
         s->total_time = end_time - s->total_time;
-        s->downtime = end_time - start_time;
+        if (!s->params.postcopy) {
+            s->downtime = end_time - start_time;
+        }
         runstate_set(RUN_STATE_POSTMIGRATE);
     } else {
         if (old_vm_running) {
-            vm_start();
+            if (s->substate != MIG_SUBSTATE_POSTCOPY) {
+                vm_start();
+            } else {
+                /* TODO:warn it */
+            }
         }
     }
     qemu_bh_schedule(s->cleanup_bh);
@@ -634,6 +673,7 @@ static void *migration_thread(void *opaque)
 void migrate_fd_connect(MigrationState *s)
 {
     s->state = MIG_STATE_ACTIVE;
+    s->substate = MIG_SUBSTATE_PRECOPY;
     trace_migrate_set_state(MIG_STATE_ACTIVE);
 
     /* This is a best 1st approximation. ns to ms */
