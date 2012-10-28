@@ -506,8 +506,10 @@ bool ram_save_block(QEMUFile *f, bool last_stage)
         if (offset >= block->length) {
             offset = 0;
             block = QLIST_NEXT(block, next);
-            if (!block)
+            if (!block) {
                 block = QLIST_FIRST(&ram_list.blocks);
+                migrate_get_current()->precopy_count++;
+            }
         }
     } while (block != last_block || offset != last_offset);
 
@@ -623,7 +625,7 @@ static int ram_save_setup(QEMUFile *f, void *opaque)
         acct_clear();
     }
 
-    if (!params->postcopy) {
+    if (!(params->postcopy && params->precopy_count == 0)) {
         memory_global_dirty_log_start();
         migration_bitmap_sync();
     }
