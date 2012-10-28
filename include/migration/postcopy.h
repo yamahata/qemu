@@ -48,6 +48,9 @@ struct QEMUUMemReq {
 };
 typedef struct QEMUUMemReq QEMUUMemReq;
 
+uint64_t postcopy_bitmap_length(uint64_t length);
+void postcopy_be64_to_bitmap(uint8_t *buffer, uint64_t length);
+
 /* outgoing part */
 enum POState {
     PO_STATE_ERROR_RECEIVE,
@@ -80,6 +83,7 @@ struct UMemBlock {
                                            in TARGET_PAGE_SIZE */
     unsigned long *phys_received;       /* thread to read from outgoing qemu
                                            in TARGET_PAGE_SIZE */
+    unsigned long *clean_bitmap;
     unsigned long nr_pending_clean;     /* protected by pending_clean_mutex */
     unsigned long *pending_clean_bitmap;/* protected by pending_clean_mutex */
 };
@@ -92,5 +96,6 @@ int postcopy_incoming_umem_ram_loaded(UMemBlock *block, ram_addr_t offset);
 #endif
 void postcopy_incoming_umem_eos_received(void);
 void postcopy_incoming_umem_req_eoc(void);
+void postcopy_incoming_umemd_read_clean_bitmap_done(UMemBlock *block);
 
 #endif /* MIGRATE_POSTCOPY_H */
