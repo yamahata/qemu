@@ -54,6 +54,9 @@ bool ram_save_page(QEMUFile *f, RAMBlock *block, ram_addr_t offset,
                    bool last_stage);
 RAMBlock *ram_find_block(const char *id, uint8_t len);
 int ram_load_mem_size(QEMUFile *f, ram_addr_t total_ram_bytes);
+int ram_load(QEMUFile *f, void *opaque, int version_id,
+             void *(host_from_stream_offset_p)(QEMUFile *f,
+                                               ram_addr_t offsset, int flags));
 #endif
 
 #endif
