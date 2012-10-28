@@ -576,6 +576,7 @@ bool ram_save_block(QEMUFile *f, bool disable_xbzrle, bool last_stage)
                 block = QTAILQ_FIRST(&ram_list.blocks);
                 complete_round = true;
                 ram_bulk_stage = false;
+                migrate_get_current()->precopy_count++;
             }
         } else {
             ram_save_page_do(f, block, offset,
@@ -662,6 +663,7 @@ static void reset_ram_globals(void)
 
 static int ram_save_setup(QEMUFile *f, void *opaque)
 {
+    const MigrationParams *params = &migrate_get_current()->params;
     RAMBlock *block;
 
     migration_bitmap_init();
@@ -686,7 +688,7 @@ static int ram_save_setup(QEMUFile *f, void *opaque)
     bytes_transferred = 0;
     reset_ram_globals();
 
-    if (!migration_postcopy_outgoing()) {
+    if (!(migration_postcopy_outgoing() && params->precopy_count == 0)) {
         memory_global_dirty_log_start();
         migration_bitmap_sync();
     }
