@@ -64,6 +64,10 @@ int exec_start_outgoing_migration(MigrationState *s, const char *command)
 {
     FILE *f;
 
+    if (s->params.postcopy) {
+        return -ENOSYS;
+    }
+
     f = popen(command, "w");
     if (f == NULL) {
         DPRINTF("Unable to popen exec target\n");

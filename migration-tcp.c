@@ -64,7 +64,11 @@ static void tcp_wait_for_connect(int fd, void *opaque)
     } else {
         DPRINTF("migrate connect success\n");
         s->fd = fd;
-        migrate_fd_connect(s);
+        if (postcopy_outgoing_create_read_socket(s) < 0) {
+            migrate_fd_error(s);
+        } else {
+            migrate_fd_connect(s);
+        }
     }
 }
 
