@@ -35,6 +35,12 @@
 
 void exec_start_outgoing_migration(MigrationState *s, const char *command, Error **errp)
 {
+    if (migration_postcopy_outgoing()) {
+        error_setg_errno(errp, ENOSYS,
+                         "exec method doesn't support outgoing postcopy");
+        return;
+    }
+
     s->file = qemu_popen_cmd(command, "w");
     if (s->file == NULL) {
         error_setg_errno(errp, errno, "failed to popen the migration target");

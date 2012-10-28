@@ -35,13 +35,21 @@ static void unix_wait_for_connect(int fd, void *opaque)
 
     if (fd < 0) {
         DPRINTF("migrate connect error\n");
-        s->file = NULL;
-        migrate_fd_error(s);
+        goto error;
     } else {
         DPRINTF("migrate connect success\n");
+        if (postcopy_outgoing_create_read_socket(s, fd) < 0) {
+            closesocket(fd);
+            goto error;
+        }
         s->file = qemu_fopen_socket(fd, "wb");
         migrate_fd_connect(s);
     }
+    return;
+
+error:
+    s->file = NULL;
+    migrate_fd_error(s);
 }
 
 void unix_start_outgoing_migration(MigrationState *s, const char *path, Error **errp)
