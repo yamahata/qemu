@@ -32,6 +32,7 @@
 #include "qemu/queue.h"
 #include "migration/umem.h"
 
+/* incoming -> outgoing message */
 #define QEMU_UMEM_REQ_EOC       0x01
 #define QEMU_UMEM_REQ_PAGE      0x02
 #define QEMU_UMEM_REQ_PAGE_CONT 0x03
@@ -47,6 +48,24 @@ struct QEMUUMemReq {
 };
 typedef struct QEMUUMemReq QEMUUMemReq;
 
+/* outgoing part */
+enum POState {
+    PO_STATE_ERROR_RECEIVE,
+    PO_STATE_ACTIVE,
+    PO_STATE_EOC_RECEIVED,
+    PO_STATE_ALL_PAGES_SENT,
+    PO_STATE_COMPLETED,
+};
+typedef enum POState POState;
+
+#if !defined(CONFIG_USER_ONLY) && defined(NEED_CPU_H)
+struct PostcopyOutgoingState {
+    POState state;
+    RAMBlock *last_block_read;
+};
+#endif
+
+/* incoming */
 QLIST_HEAD(UMemBlockHead, UMemBlock);
 typedef struct UMemBlockHead UMemBlockHead;
 
