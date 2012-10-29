@@ -111,6 +111,8 @@ uint64_t ram_bytes_transferred(void);
 uint64_t ram_bytes_total(void);
 void migration_bitmap_init(void);
 void migration_bitmap_free(void);
+const unsigned long *migration_bitmap_get(void);
+void migration_bitmap_sync(void);
 
 extern SaveVMHandlers savevm_ram_handlers;
 

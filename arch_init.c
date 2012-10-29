@@ -345,6 +345,11 @@ void migration_bitmap_free(void)
     migration_bitmap = NULL;
 }
 
+const unsigned long *migration_bitmap_get(void)
+{
+    return migration_bitmap;
+}
+
 static inline bool migration_bitmap_test_and_reset_dirty(MemoryRegion *mr,
                                                          ram_addr_t offset)
 {
@@ -373,7 +378,7 @@ static inline bool migration_bitmap_set_dirty(MemoryRegion *mr,
     return ret;
 }
 
-static void migration_bitmap_sync(void)
+void migration_bitmap_sync(void)
 {
     RAMBlock *block;
     ram_addr_t addr;
