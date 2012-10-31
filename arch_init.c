@@ -336,7 +336,7 @@ void migration_bitmap_init(void)
     if (!migration_bitmap) {
         migration_bitmap = bitmap_new(ram_pages);
     }
-    bitmap_set(migration_bitmap, 1, ram_pages);
+    bitmap_set(migration_bitmap, 0, ram_pages);
     migration_dirty_pages = ram_pages;
 }
 
