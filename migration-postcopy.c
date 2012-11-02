@@ -1875,31 +1875,48 @@ static int postcopy_incoming_umemd_read_dirty_bitmap(
     buffer = g_malloc(bitmap_length);
     qemu_get_buffer(f, buffer, bitmap_length);
 
+    /* setting phys_requested is racey,
+       but write side just sends redundant request */
     bit_offset = bit_start & ~63;
-    index = 0;
-    while (index < bitmap_length) {
-        uint64_t bitmap;
-        int i;
-
-        bitmap = be64_to_cpup((uint64_t*)(buffer + index));
-        for (i = 0; i < 64; i++) {
-            int bit = bit_offset + i;
-            if (bit < bit_start) {
-                continue;
-            }
-            if (bit >= bit_end) {
-                break;
-            }
-            if (!(bitmap & (1ULL << i))) {
-                set_bit(bit - bit_start, block->phys_received);
-
-                /* this is racy, but write side just sends redundant request */
-                set_bit(bit - bit_start, block->phys_requested);
-            }
+    if (bit_offset == bit_start) {
+        for (index = 0; index < bitmap_length; index += sizeof(uint64_t)) {
+            uint64_t bitmap = be64_to_cpup((uint64_t*)(buffer + index));
+#if HOST_LONG_BITS == 64
+            *(block->phys_received + index / sizeof(uint64_t)) = ~bitmap;
+            *(block->phys_requested + index / sizeof(uint64_t)) = ~bitmap;
+#elif HOST_LONG_BITS == 32
+            *(block->phys_received + index / sizeof(uint32_t)) = ~bitmap;
+            *(block->phys_received + index / sizeof(uint32_t) + 1) =
+                ~(bitmap >> 32);
+            *(block->phys_requested + index / sizeof(uint32_t)) = ~bitmap;
+            *(block->phys_requested + index / sizeof(uint32_t) + 1) =
+                ~(bitmap >> 32);
+#else
+# error "unsupported"
+#endif
         }
+    } else {
+        for (index = 0; index < bitmap_length; index += sizeof(uint64_t)) {
+            uint64_t bitmap;
+            int i;
 
-        bit_offset += 64;
-        index += sizeof(bitmap);
+            bitmap = be64_to_cpup((uint64_t*)(buffer + index));
+            for (i = 0; i < 64; i++) {
+                int bit = bit_offset + i;
+                if (bit < bit_start) {
+                    continue;
+                }
+                if (bit >= bit_end) {
+                    break;
+                }
+                if (!(bitmap & (1ULL << i))) {
+                    set_bit(bit - bit_start, block->phys_received);
+                    set_bit(bit - bit_start, block->phys_requested);
+                }
+            }
+
+            bit_offset += 64;
+        }
     }
 
     g_free(buffer);
