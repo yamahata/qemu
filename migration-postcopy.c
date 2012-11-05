@@ -791,6 +791,7 @@ struct PostcopyIncomingUMemDaemon {
     UMemBlock *last_block_write;        /* umem daemon -> qemu on source */
     /* bitmap indexed by target page offset */
     UMemPages *page_request;
+    UMemPages *page_clean;
     uint64_t *target_pgoffs;
 
     /* thread to write to fault pipe write
@@ -1539,11 +1540,23 @@ static int postcopy_incoming_umem_send_page_req(UMemBlock *block)
 
     req.nr = 0;
     req.pgoffs = umemd.target_pgoffs;
+    umemd.page_clean->nr = 0;
     if (TARGET_PAGE_SIZE >= umemd.host_page_size) {
         for (i = 0; i < umemd.page_request->nr; i++) {
             target_pgoff = umemd.page_request->pgoffs[i] >>
                 umemd.host_to_target_page_shift;
-            if (!test_and_set_bit(target_pgoff, block->phys_requested)) {
+            if (umemd.precopy_enabled &&
+                /* race with postcopy_incoming_umemd_read_clean_bitmap
+                   but it results in sending redundant page req */
+                test_bit(target_pgoff, block->clean_bitmap)) {
+                int j;
+                for (j = 0; j < umemd.nr_host_pages_per_target_page; j++) {
+                    umemd.page_clean->pgoffs[umemd.page_clean->nr] =
+                        umemd.page_request->pgoffs[i] + j;
+                    umemd.page_clean->nr++;
+                }
+            } else if (!test_and_set_bit(target_pgoff,
+                                         block->phys_requested)) {
                 req.pgoffs[req.nr] = target_pgoff;
                 req.nr++;
             }
@@ -1551,13 +1564,31 @@ static int postcopy_incoming_umem_send_page_req(UMemBlock *block)
     } else {
         for (i = 0; i < umemd.page_request->nr; i++) {
             int j;
+            bool marked_clean = false;
             target_pgoff = umemd.page_request->pgoffs[i] <<
                 umemd.host_to_target_page_shift;
-            for (j = 0; j < umemd.nr_target_pages_per_host_page; j++) {
-                if (!test_and_set_bit(target_pgoff + j,
-                                      block->phys_requested)) {
-                    req.pgoffs[req.nr] = target_pgoff + j;
-                    req.nr++;
+            if (umemd.precopy_enabled) {
+                marked_clean = true;
+                /* race with postcopy_incoming_umemd_read_clean_bitmap
+                   but it results in sending redundant page req */
+                for (j = 0; j < umemd.nr_target_pages_per_host_page; j++) {
+                    if (!test_bit(target_pgoff + j, block->clean_bitmap)) {
+                        marked_clean = false;
+                        break;
+                    }
+                }
+            }
+            if (marked_clean) {
+                umemd.page_clean->pgoffs[umemd.page_clean->nr] =
+                    umemd.page_request->pgoffs[i];
+                umemd.page_clean->nr++;
+            } else {
+                for (j = 0; j < umemd.nr_target_pages_per_host_page; j++) {
+                    if (!test_and_set_bit(target_pgoff + j,
+                                          block->phys_requested)) {
+                        req.pgoffs[req.nr] = target_pgoff + j;
+                        req.nr++;
+                    }
                 }
             }
         }
@@ -1565,6 +1596,12 @@ static int postcopy_incoming_umem_send_page_req(UMemBlock *block)
 
     DPRINTF("id %s nr %d offs 0x%"PRIx64" 0x%"PRIx64"\n",
             block->idstr, req.nr, req.pgoffs[0], req.pgoffs[1]);
+    if (umemd.page_clean->nr > 0) {
+        int error = umem_mark_page_cached(block->umem, umemd.page_clean);
+        if (error) {
+            return error;
+        }
+    }
     if (req.nr > 0 && umemd.mig_write != NULL) {
         postcopy_incoming_send_req(umemd.mig_write, &req);
         umemd.last_block_write = block;
@@ -2404,6 +2441,9 @@ static void postcopy_incoming_umemd(void)
     DPRINTF("daemon pid: %d\n", getpid());
 
     umemd.page_request = g_malloc(umem_pages_size(MAX_REQUESTS));
+    umemd.page_clean = g_malloc(
+        umem_pages_size(MAX_REQUESTS *
+                        MAX(1, umemd.nr_host_pages_per_target_page)));
     umemd.page_cached = g_malloc(
         umem_pages_size(MAX_REQUESTS *
                         (TARGET_PAGE_SIZE >= umemd.host_page_size ?
@@ -2462,6 +2502,7 @@ static void postcopy_incoming_umemd(void)
     qemu_thread_join(&umemd_fault_thread);
 
     g_free(umemd.page_request);
+    g_free(umemd.page_clean);
     g_free(umemd.page_cached);
     g_free(umemd.target_pgoffs);
 
