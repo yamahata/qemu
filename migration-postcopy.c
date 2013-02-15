@@ -1389,12 +1389,10 @@ static void postcopy_incoming_fault_loop(int read_fd, int write_fd)
                 continue;
             }
             perror("qemu pipe read\n");
-            return;
+            break;
         }
         if (ret == 0) {
-            close(read_fd);
-            close(write_fd);
-            return;
+            break;
         }
 
         offset += ret;
@@ -1414,11 +1412,14 @@ static void postcopy_incoming_fault_loop(int read_fd, int write_fd)
         ret = qemu_write_full(write_fd, buf, nreq * sizeof(buf[0]));
         if (ret != nreq * sizeof(buf[0])) {
             perror("qemu pipe write\n");
-            return;
+            break;
         }
         memmove(buf, (uint8_t*)buf + ret, offset - ret);
         offset -= ret;
     }
+
+    close(read_fd);
+    close(write_fd);
 }
 
 static void *postcopy_incoming_fault_thread(void *args)
