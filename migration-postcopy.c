@@ -1840,7 +1840,7 @@ static void *postcopy_incoming_umemd_fault_clean_bitmap(void *args)
                 }
             } else {
                 bool mark_cache = true;
-                if ((i % umemd.nr_target_pages_per_host_page) != 0) {
+                if ((bit % umemd.nr_target_pages_per_host_page) != 0) {
                     /* skip to next host page */
                     bit |= umemd.nr_target_pages_per_host_page - 1;
                     continue;
