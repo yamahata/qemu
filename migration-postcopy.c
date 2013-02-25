@@ -817,6 +817,9 @@ struct UMemBlock {
     unsigned long *phys_received;       /* thread to read from outgoing qemu
                                            in TARGET_PAGE_SIZE */
     unsigned long *clean_bitmap;
+
+    unsigned long nr_pending_clean;     /* protected by pending_clean_mutex */
+    unsigned long *pending_clean_bitmap;/* protected by pending_clean_mutex */
 };
 typedef struct UMemBlock UMemBlock;
 
@@ -867,6 +870,19 @@ struct PostcopyIncomingUMemDaemon {
     UMemPages *page_request;
     UMemPages *page_clean;
     uint64_t *target_pgoffs;
+
+    /* thread to write to fault pipe write
+     * Usually postcopy_incoming_umem_ram_load() writes to fault pipe write
+     * by postcopy_incoming_umem_mark_cached(). But it can't be blocked
+     * to avoid deadlock. Such pages are marked in
+     * UMemBlock::pending_clean_bitmap
+     * In that case, this thread handles them.
+     */
+    QemuThread pending_clean_thread;
+    QemuMutex pending_clean_mutex;
+    QemuCond pending_clean_cond;
+    unsigned long nr_pending_clean;     /* protected by pending_clean_mutex */
+    bool pending_clean_exit;
 
     /* thread to fault pipe read */
     QemuThread fault_thread;
@@ -1015,6 +1031,7 @@ static void postcopy_incoming_umem_block_free(void)
         g_free(block->phys_requested);
         g_free(block->phys_received);
         g_free(block->clean_bitmap);
+        g_free(block->pending_clean_bitmap);
         g_free(block);
     }
     qemu_mutex_unlock_ramlist();
@@ -1196,6 +1213,8 @@ static int postcopy_incoming_create_umemd(QEMUFile *mig_read)
         }
         umemd.mig_write_fd = mig_write_fd;
         umemd.mig_write = qemu_fopen_fd(mig_write_fd, "w");
+
+        socket_set_nonblock(umemd.fault_write_fd);
 
         postcopy_incoming_umemd();      /* noreturn */
         return -EINVAL;
@@ -1678,34 +1697,57 @@ static UMemBlock *postcopy_incoming_umem_block_from_stream(
     return NULL;
 }
 
-static int postcopy_incoming_umem_mark_cached(UMem *umem,
-                                              const UMemPages *page_cached)
+static void postcopy_incoming_umem_wait_fault_write_fd(void)
+{
+    /* wait for umemd.fault_write_fd to be writable */
+    int nfds = -1;
+    fd_set writefds;
+
+    FD_ZERO(&writefds);
+    set_fd(umemd.fault_write_fd, &writefds, &nfds);
+    select(nfds + 1, NULL, &writefds, NULL, NULL);
+}
+
+static int postcopy_incoming_umem_fault_request(const UMemPages *page_cached,
+                                                bool nonblock)
 {
     int error;
-    size_t length;
-    const uint8_t *buf;
+    size_t length = page_cached->nr * sizeof(page_cached->pgoffs[0]);
+    const uint8_t *buf = (const uint8_t*)page_cached->pgoffs;
 
-    error = umem_mark_page_cached(umem, page_cached);
-    if (error) {
-        DPRINTF("mark_cahced %d\n", error);
-        return error;
-    }
-
-    length = page_cached->nr * sizeof(page_cached->pgoffs[0]);
-    buf = (const uint8_t*)page_cached->pgoffs;
     while (length > 0) {
         /* atomic write to pipe */
         ssize_t size = MIN(PIPE_BUF, length) & ~(sizeof(uint64_t) - 1);
-        ssize_t ret;
-        ret = qemu_write_full(umemd.fault_write_fd, buf, size);
+        ssize_t ret = qemu_write_full(umemd.fault_write_fd, buf, size);
         if (ret != size) {
-            DPRINTF("error ret %zd size %zd\n", ret, size);
-            return -EPIPE;
+            error = -errno;
+            DPRINTF("error ret %zd size %zd errno %d\n", ret, size, errno);
+            if (error == -EAGAIN || error == -EWOULDBLOCK) {
+                if (nonblock) {
+                    return -EAGAIN;
+                }
+                postcopy_incoming_umem_wait_fault_write_fd();
+                continue;
+            }
+            return error;
         }
         length -= size;
         buf += size;
     }
     return 0;
+}
+
+
+static int postcopy_incoming_umem_mark_cached(
+    UMem *umem, const UMemPages *page_cached, bool nonblock)
+{
+    int error = umem_mark_page_cached(umem, page_cached);
+    if (error) {
+        DPRINTF("mark_cahced %d\n", error);
+        return error;
+    }
+
+    return postcopy_incoming_umem_fault_request(page_cached, nonblock);
 }
 
 static int postcopy_incoming_umem_ram_load(void)
@@ -1799,13 +1841,155 @@ static int postcopy_incoming_umem_ram_load(void)
 
     if (umemd.page_cached->nr > 0) {
         error = postcopy_incoming_umem_mark_cached(block->umem,
-                                                   umemd.page_cached);
+                                                   umemd.page_cached, true);
         if (error) {
-            return error;
+            if (error == -EAGAIN) {
+                /* record it for postcopy_incoming_umem_pending_clean_loop() */
+                bool wakeup = false;
+                DPRINTF("EAGAIN\n");
+                qemu_mutex_lock(&umemd.pending_clean_mutex);
+                for (i = 0; i < umemd.page_cached->nr; ++i) {
+                    /* Although this calculation is inefficient,
+                     * this code path is rare case.
+                     */
+                    uint64_t pgoff = umemd.page_cached->pgoffs[i];
+                    uint64_t addr = pgoff << umemd.host_page_shift;
+                    QLIST_FOREACH(block, &umemd.blocks, next) {
+                        if (block->offset <= addr &&
+                            addr < block->offset + block->length) {
+                            addr -= block->offset;
+                            pgoff = addr >> umemd.host_page_shift;
+                            if (!test_and_set_bit(
+                                    pgoff, block->pending_clean_bitmap)) {
+                                block->nr_pending_clean++;
+                                umemd.nr_pending_clean++;
+                                wakeup = true;
+                            }
+                            break;
+                        }
+                    }
+                }
+                if (wakeup) {
+                    qemu_cond_broadcast(&umemd.pending_clean_cond);
+                }
+                qemu_mutex_unlock(&umemd.pending_clean_mutex);
+            } else {
+                perror("postcopy_incoming_umem_ram_load() write pipe\n");
+                return error;
+            }
         }
     }
 
     return 0;
+}
+
+static int postcopy_incoming_umemd_pending_clean_loop(void)
+{
+    uint64_t buffer[(sizeof(UMemPages) + PIPE_BUF + 7) / sizeof(uint64_t)];
+    UMemPages * const page_cached = (UMemPages*)buffer;
+    const int max_nr = PIPE_BUF / sizeof(uint64_t) - 1;
+    UMemBlock *block;
+    int error;
+
+    DPRINTF("pending clean bitmap\n");
+    QLIST_FOREACH(block, &umemd.blocks, next) {
+        const int nbits = block->length >> umemd.host_page_shift;
+        int bit;
+
+        if (block->nr_pending_clean == 0) {
+            continue;
+        }
+
+        DPRINTF("idstr %s\n", block->idstr);
+        page_cached->nr = 0;
+        for (bit = find_first_bit(block->pending_clean_bitmap, nbits);
+             bit < nbits;
+             bit = find_next_bit(block->pending_clean_bitmap, nbits, ++bit)) {
+            clear_bit(bit, block->pending_clean_bitmap);
+            block->nr_pending_clean--;
+            umemd.nr_pending_clean--;
+            page_cached->pgoffs[page_cached->nr] = bit;
+            page_cached->nr++;
+
+            if (page_cached->nr == max_nr) {
+                qemu_mutex_unlock(&umemd.pending_clean_mutex);
+                error = postcopy_incoming_umem_fault_request(page_cached,
+                                                             false);
+                qemu_mutex_lock(&umemd.pending_clean_mutex);
+                if (error) {
+                    goto error_out;
+                }
+                page_cached->nr = 0;
+            }
+        }
+        if (page_cached->nr > 0) {
+            qemu_mutex_unlock(&umemd.pending_clean_mutex);
+            error = postcopy_incoming_umem_fault_request(page_cached, false);
+            qemu_mutex_lock(&umemd.pending_clean_mutex);
+            if (error) {
+                goto error_out;
+            }
+        }
+    }
+
+    DPRINTF("pending clean bitmap done\n");
+    return 0;
+
+error_out:
+    perror("umemd clean bitmap pipe write\n");
+    fd_close(&umemd.fault_write_fd);
+    return error;
+}
+
+static void *postcopy_incoming_umemd_pending_clean_thread(void* arg)
+{
+    DPRINTF("postcopy_incoming_umemd_pending_clean_thread starts\n");
+    qemu_mutex_lock(&umemd.pending_clean_mutex);
+    for (;;) {
+        bool do_sleep;
+        int error;
+
+        if (umemd.nr_pending_clean == 0) {
+            if (umemd.pending_clean_exit) {
+                break;
+            }
+            qemu_cond_wait(&umemd.pending_clean_cond,
+                           &umemd.pending_clean_mutex);
+            continue;
+        }
+
+        /*
+         * the pipe of umemd.fault_write_fd is full.
+         * give postcopy_incoming_fault_thread() a chance to process.
+         * postcopy_incoming_umem_ram_load() is likely to set more
+         * bits in pending_clean_bitmap. Increase the possibility of batching.
+         */
+        do_sleep = !umemd.pending_clean_exit;
+        qemu_mutex_unlock(&umemd.pending_clean_mutex);
+        postcopy_incoming_umem_wait_fault_write_fd();
+        if (do_sleep) {
+            struct timespec timespec = {.tv_sec = 1, .tv_nsec = 0};
+            nanosleep(&timespec, NULL);
+        }
+        qemu_mutex_lock(&umemd.pending_clean_mutex);
+
+        error = postcopy_incoming_umemd_pending_clean_loop();
+        if (error < 0) {
+            DPRINTF("postcopy_incoming_umemd_pending_clean_loop "
+                    "error = %d\n", error);
+            break;
+        }
+    }
+    qemu_mutex_unlock(&umemd.pending_clean_mutex);
+    DPRINTF("postcopy_incoming_umemd_pending_clean_thread exits\n");
+    return NULL;
+}
+
+static void postcopy_incoming_umemd_pending_clean_create(void)
+{
+    qemu_thread_create(&umemd.pending_clean_thread,
+                       &postcopy_incoming_umemd_pending_clean_thread, NULL,
+                       QEMU_THREAD_JOINABLE);
 }
 
 static void *postcopy_incoming_umemd_fault_clean_bitmap(void *args)
@@ -1862,7 +2046,7 @@ static void *postcopy_incoming_umemd_fault_clean_bitmap(void *args)
             }
             if (max_nr - page_cached->nr < needed) {
                 error = postcopy_incoming_umem_mark_cached(block->umem,
-                                                           page_cached);
+                                                           page_cached, false);
                 if (error) {
                     goto error_out;
                 }
@@ -1871,20 +2055,22 @@ static void *postcopy_incoming_umemd_fault_clean_bitmap(void *args)
         }
         if (page_cached->nr > 0) {
             error = postcopy_incoming_umem_mark_cached(block->umem,
-                                                       page_cached);
+                                                       page_cached, false);
             if (error) {
                 goto error_out;
             }
         }
     }
 
+out:
     DPRINTF("faulting clean bitmap done\n");
+    postcopy_incoming_umemd_pending_clean_create();
     return NULL;
 
 error_out:
     perror("umemd bitmap pipe write\n");
     fd_close(&umemd.fault_write_fd);
-    return NULL;
+    goto out;
 }
 
 static int postcopy_incoming_umemd_read_dirty_bitmap(
@@ -1976,6 +2162,7 @@ static int postcopy_incoming_umemd_mig_read_init(void)
 #endif
 
     if (!umemd.precopy_enabled) {
+        postcopy_incoming_umemd_pending_clean_create();
         return 0;
     }
 
@@ -2300,10 +2487,16 @@ static void postcopy_incoming_umemd(void)
         block->phys_requested = bitmap_new(nbits);
         block->phys_received = bitmap_new(nbits);
         if (umemd.precopy_enabled) {
-            block->clean_bitmap =
-                bitmap_new(block->length >> TARGET_PAGE_BITS);
+            block->clean_bitmap = bitmap_new(nbits);
         }
+        block->nr_pending_clean = 0;
+        block->pending_clean_bitmap =
+            bitmap_new(block->length >> umemd.host_page_shift);
     }
+    umemd.pending_clean_exit = false;
+    umemd.nr_pending_clean = 0;
+    qemu_mutex_init(&umemd.pending_clean_mutex);
+    qemu_cond_init(&umemd.pending_clean_cond);
     umemd.last_block_read = NULL;
     umemd.last_block_write = NULL;
 
@@ -2334,6 +2527,12 @@ static void postcopy_incoming_umemd(void)
     qemu_thread_join(&umemd.mig_write_thread);
     qemu_thread_join(&umemd.pipe_thread);
 
+    qemu_mutex_lock(&umemd.pending_clean_mutex);
+    umemd.pending_clean_exit = true;
+    qemu_cond_broadcast(&umemd.pending_clean_cond);
+    qemu_mutex_unlock(&umemd.pending_clean_mutex);
+    qemu_thread_join(&umemd.pending_clean_thread);
+
     /* To tell postcopy_incmoing_fault_loop that umemd finished.
      * Then, postcopy_incoming_fault_loop() tells
      * postcopy_incoming_umemd_fault_loop() by closing fd.
@@ -2348,6 +2547,9 @@ static void postcopy_incoming_umemd(void)
     g_free(umemd.target_pgoffs);
 
     postcopy_incoming_umem_block_free();
+    qemu_mutex_destroy(&umemd.pending_clean_mutex);
+    qemu_cond_destroy(&umemd.pending_clean_cond);
+    assert(umemd.nr_pending_clean == 0);
 
     DPRINTF("umemd done\n");
     /* This daemon forked from qemu and the parent qemu is still running.
