@@ -733,7 +733,7 @@ static int ram_save_complete(QEMUFile *f, void *opaque)
     /* try transferring iterative blocks of memory */
 
     /* flush all remaining blocks regardless of rate limiting */
-    while (!ram_save_block(f, true)) {
+    while (ram_save_block(f, true)) {
         /* nothing */
     }
     memory_global_dirty_log_stop();

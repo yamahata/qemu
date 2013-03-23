@@ -720,7 +720,7 @@ int postcopy_outgoing_ram_save_background(QEMUFile *f, void *postcopy)
         struct timeval timeout = {.tv_sec = 0, .tv_usec = 0};
         int ret;
 
-        if (ram_save_block(f, false) == 0) { /* no more blocks */
+        if (!ram_save_block(f, false)) { /* no more blocks */
             DPRINTF("outgoing background all sent\n");
             assert(s->state == PO_STATE_ACTIVE);
             postcopy_outgoing_ram_all_sent(f, s);
