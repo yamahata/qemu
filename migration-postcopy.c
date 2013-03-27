@@ -1385,7 +1385,7 @@ static void postcopy_incoming_fault_loop(int read_fd, int write_fd)
 
         ret = read(read_fd, (uint8_t*)buf + offset, sizeof(buf) - offset);
         if (ret < 0) {
-            if (errno == -EINTR) {
+            if (errno == EINTR) {
                 continue;
             }
             perror("qemu pipe read\n");
