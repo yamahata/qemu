@@ -2161,41 +2161,30 @@ static int postcopy_incoming_umemd_pipe_loop(void)
     return 0;
 }
 
+/*
+ * return value
+ * 0: success. loop continues
+ * 1: success. loop exits
+ * <0: error
+ */
 static int postcopy_incoming_umemd_fault_loop(void)
 {
-    /* to check UMEM_STATE_QUIT_QUEUED periodically */
-    struct timeval timeout = {.tv_sec = 1, .tv_usec = 0};
-    fd_set readfds;
-    int nfds = -1;
     ssize_t ret;
     int i;
     int nreq;
 
-    FD_ZERO(&readfds);
-    if (umemd.fault_read_fd >= 0) {
-        set_fd(umemd.fault_read_fd, &readfds, &nfds);
-    }
-    ret = select(nfds + 1, &readfds, NULL, NULL, &timeout);
-    if (ret == -1) {
-        if (errno == EINTR) {
-            return 0;
-        }
-        return ret;
-    }
-
     ret = read(umemd.fault_read_fd, (uint8_t*)umemd.buf + umemd.offset,
                sizeof(umemd.buf) - umemd.offset);
     if (ret < 0) {
-        if (errno == EINTR || errno == EAGAIN) {
+        if (errno == EINTR) {
             return 0;
         }
         perror("umemd pipe read\n");
-        fd_close(&umemd.fault_read_fd);
         return ret;
     }
     if (ret == 0) {
-        fd_close(&umemd.fault_read_fd);
-        return -EPIPE;
+        /* EOF: pipe is closed */
+        return 1;
     }
 
     umemd.offset += ret;
@@ -2216,16 +2205,31 @@ static int postcopy_incoming_umemd_fault_loop(void)
             abort();
         }
     }
+    umemd.offset &= sizeof(umemd.buf[0]) - 1;
     memmove(umemd.buf, (uint8_t*)umemd.buf + nreq * sizeof(umemd.buf[0]),
-            umemd.offset & sizeof(umemd.buf[0] - 1));
-    umemd.offset &= sizeof(umemd.buf[0] - 1);
+            umemd.offset);
 
     if (postcopy_incoming_umem_check_umem_done()) {
         postcopy_incoming_umem_done();
-        fd_close(&umemd.fault_read_fd);
-        return -EINVAL;
+        return 1;
     }
     return 0;
+}
+
+static void *postcopy_incoming_umemd_fault_thread(void* arg)
+{
+    for (;;) {
+        int error = postcopy_incoming_umemd_fault_loop();
+        if (error < 0) {
+            DPRINTF("postcopy_incoming_umemd_fault_loop error = %d\n", error);
+        }
+        if (error) {
+            break;
+        }
+    }
+    DPRINTF("postcopy_incoming_umemd_fault_thread exits\n");
+    fd_close(&umemd.fault_read_fd);
+    return NULL;
 }
 
 
@@ -2300,11 +2304,8 @@ static void postcopy_incoming_umemd(void)
     umemd.last_block_read = NULL;
     umemd.last_block_write = NULL;
 
-    socket_set_nonblock(umemd.fault_read_fd);
     qemu_thread_create(&umemd_fault_thread,
-                       &postcopy_incoming_umemd_thread,
-                       &(IncomingThread){
-                           NULL, &postcopy_incoming_umemd_fault_loop,},
+                       &postcopy_incoming_umemd_fault_thread, NULL,
                        QEMU_THREAD_JOINABLE);
     qemu_thread_create(&umemd.mig_read_thread,
                        &postcopy_incoming_umemd_thread,
