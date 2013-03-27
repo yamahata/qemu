@@ -1814,6 +1814,7 @@ static void *postcopy_incoming_umemd_fault_clean_bitmap(void *args)
     UMemPages *page_cached = (UMemPages*)buffer;
     int max_nr = PIPE_BUF / sizeof(uint64_t);
     int needed;
+
     if (TARGET_PAGE_SIZE >= umemd.host_page_size) {
         needed = umemd.nr_host_pages_per_target_page;
     } else {
@@ -1861,9 +1862,7 @@ static void *postcopy_incoming_umemd_fault_clean_bitmap(void *args)
                 error = postcopy_incoming_umem_mark_cached(block->umem,
                                                            page_cached);
                 if (error) {
-                    perror("umemd bitmap pipe read\n");
-                    fd_close(&umemd.fault_write_fd);
-                    goto out;
+                    goto error_out;
                 }
                 page_cached->nr = 0;
             }
@@ -1872,15 +1871,17 @@ static void *postcopy_incoming_umemd_fault_clean_bitmap(void *args)
             error = postcopy_incoming_umem_mark_cached(block->umem,
                                                        page_cached);
             if (error) {
-                perror("umemd bitmap pipe read\n");
-                fd_close(&umemd.fault_write_fd);
-                goto out;
+                goto error_out;
             }
         }
     }
 
-out:
     DPRINTF("faulting clean bitmap done\n");
+    return NULL;
+
+error_out:
+    perror("umemd bitmap pipe write\n");
+    fd_close(&umemd.fault_write_fd);
     return NULL;
 }
 
