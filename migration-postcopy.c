@@ -2326,12 +2326,18 @@ static void postcopy_incoming_umemd(void)
                        QEMU_THREAD_JOINABLE);
 
     qemu_thread_join(&umemd.mig_read_thread);
-    fd_close(&umemd.fault_write_fd);
     if (umemd.precopy_enabled) {
         qemu_thread_join(&umemd.bitmap_thread);
     }
     qemu_thread_join(&umemd.mig_write_thread);
     qemu_thread_join(&umemd.pipe_thread);
+
+    /* To tell postcopy_incmoing_fault_loop that umemd finished.
+     * Then, postcopy_incoming_fault_loop() tells
+     * postcopy_incoming_umemd_fault_loop() by closing fd.
+     * Then postcopy_incoming_umemd_fault_loop() exits.
+     */
+    fd_close(&umemd.fault_write_fd);
     qemu_thread_join(&umemd_fault_thread);
 
     g_free(umemd.page_request);
