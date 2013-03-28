@@ -1812,8 +1812,8 @@ static void *postcopy_incoming_umemd_fault_clean_bitmap(void *args)
 {
     int i;
     UMemBlock *block;
-    uint8_t buffer[sizeof(UMemPages) + PIPE_BUF];
-    UMemPages *page_cached = (UMemPages*)buffer;
+    uint64_t buffer[(sizeof(UMemPages) + PIPE_BUF + 7) / sizeof(uint64_t)];
+    UMemPages * const page_cached = (UMemPages*)buffer;
     int max_nr = PIPE_BUF / sizeof(uint64_t);
     int needed;
 
