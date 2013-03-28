@@ -1405,8 +1405,10 @@ static void postcopy_incoming_fault_loop(int read_fd, int write_fd)
         for (i = 0; i < nreq; i++) {
             ram_addr_t addr = buf[i] << host_page_shift;
             volatile uint8_t *ram = qemu_safe_ram_ptr(addr);
-            uint8_t dummy_read = ram[0];
-            (void)dummy_read;   /* suppress unused variable warning */
+            if (ram) {
+                uint8_t dummy_read = ram[0];
+                (void)dummy_read;   /* suppress unused variable warning */
+            }
         }
         qemu_mutex_unlock_ramlist();
         ret = qemu_write_full(write_fd, buf, nreq * sizeof(buf[0]));
