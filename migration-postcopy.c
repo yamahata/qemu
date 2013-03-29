@@ -1599,17 +1599,15 @@ static int postcopy_incoming_umem_send_page_req(UMemBlock *block)
     } else {
         for (i = 0; i < umemd.page_request->nr; i++) {
             int j;
-            bool marked_clean = true;
+            bool marked_clean = false;
             target_pgoff = umemd.page_request->pgoffs[i] <<
                 umemd.host_to_target_page_shift;
-            if (!umemd.precopy_enabled) {
-                marked_clean = false;
-            } else {
+            if (umemd.precopy_enabled) {
+                marked_clean = true;
                 /* race with postcopy_incoming_umemd_read_dirty_bitmap
                    but it results in sending redundant page req */
                 for (j = 0; j < umemd.nr_target_pages_per_host_page; j++) {
-                    if (!test_and_set_bit(target_pgoff + j,
-                                          block->phys_requested)) {
+                    if (!test_bit(target_pgoff + j, block->clean_bitmap)) {
                         marked_clean = false;
                         break;
                     }
