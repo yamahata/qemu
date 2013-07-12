@@ -196,7 +196,7 @@ void umem_remove_shmem(UMem *umem, size_t offset, size_t size)
     for (i = s; i < e; i++) {
         if (!test_and_set_bit(i, umem->faulted)) {
             umem->nsets++;
-            /* qemu_madvise(umem->shmem + offset, size, QEMU_MADV_REMOVE); */
+            qemu_madvise(umem->shmem + offset, size, QEMU_MADV_REMOVE);
         }
     }
 }
