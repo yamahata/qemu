@@ -129,7 +129,6 @@ static PhysPageMap next_map;
 
 static void io_mem_init(void);
 static void memory_map_init(void);
-static void *qemu_safe_ram_ptr(ram_addr_t addr);
 
 static MemoryRegion io_mem_watch;
 #endif
@@ -1358,7 +1357,7 @@ void *qemu_get_ram_ptr(ram_addr_t addr)
  *
  * ??? Is this still necessary?
  */
-static void *qemu_safe_ram_ptr(ram_addr_t addr)
+void *qemu_safe_ram_ptr(ram_addr_t addr)
 {
     RAMBlock *block;
 
