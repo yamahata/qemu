@@ -51,6 +51,21 @@ struct MigrationState
     int64_t xbzrle_cache_size;
 };
 
+struct MigrationRateLimitStat
+{
+    int64_t initial_time;       /* in mili-second */
+    int64_t initial_bytes;
+    int64_t max_size;
+};
+typedef struct MigrationRateLimitStat MigrationRateLimitStat;
+
+void migration_update_rate_limit_stat(MigrationState *s,
+                                      MigrationRateLimitStat *rlstat,
+                                      int64_t current_time);
+int64_t migration_sleep_time_ms(const MigrationRateLimitStat *rlstat,
+                                int64_t current_time);
+
+
 void process_incoming_migration(QEMUFile *f);
 
 void qemu_start_incoming_migration(const char *uri, Error **errp);
