@@ -542,15 +542,50 @@ int64_t migrate_xbzrle_cache_size(void)
 }
 
 /* migration thread support */
+void migration_update_rate_limit_stat(MigrationState *s,
+                                      MigrationRateLimitStat *rlstat,
+                                      int64_t current_time)
+{
+    if (current_time >= rlstat->initial_time + BUFFER_DELAY) {
+        uint64_t transferred_bytes = qemu_ftell(s->file) -
+            rlstat->initial_bytes;
+        uint64_t time_spent = current_time - rlstat->initial_time;
+        double bandwidth = transferred_bytes / time_spent;
+        rlstat->max_size = bandwidth * migrate_max_downtime() / 1000000;
+
+        s->mbps = time_spent ? (((double) transferred_bytes * 8.0) /
+                ((double) time_spent / 1000.0)) / 1000.0 / 1000.0 : -1;
+        DPRINTF("transferred %" PRIu64 " time_spent %" PRIu64
+                " bandwidth %g max_size %" PRId64 "\n",
+                transferred_bytes, time_spent, bandwidth, rlstat->max_size);
+        /* if we haven't sent anything, we don't want to recalculate
+           10000 is a small enough number for our purposes */
+        if (s->dirty_bytes_rate && transferred_bytes > 10000) {
+            s->expected_downtime = s->dirty_bytes_rate / bandwidth;
+        }
+
+        qemu_file_reset_rate_limit(s->file);
+        rlstat->initial_time = current_time;
+        rlstat->initial_bytes = qemu_ftell(s->file);
+    }
+}
+
+int64_t migration_sleep_time_ms(const MigrationRateLimitStat *rlstat,
+                                int64_t current_time)
+{
+    return rlstat->initial_time + BUFFER_DELAY - current_time;
+}
 
 static void *migration_thread(void *opaque)
 {
     MigrationState *s = opaque;
-    int64_t initial_time = qemu_get_clock_ms(rt_clock);
+    MigrationRateLimitStat rlstat = {
+        .initial_time = qemu_get_clock_ms(rt_clock),
+        .initial_bytes = 0,
+        .max_size = 0,
+    };
     int64_t setup_start = qemu_get_clock_ms(host_clock);
-    int64_t initial_bytes = 0;
-    int64_t max_size = 0;
-    int64_t start_time = initial_time;
+    int64_t start_time = rlstat.initial_time;
     bool old_vm_running = false;
 
     DPRINTF("beginning savevm\n");
@@ -567,9 +602,10 @@ static void *migration_thread(void *opaque)
 
         if (!qemu_file_rate_limit(s->file)) {
             DPRINTF("iterate\n");
-            pending_size = qemu_savevm_state_pending(s->file, max_size);
-            DPRINTF("pending size %lu max %lu\n", pending_size, max_size);
-            if (pending_size && pending_size >= max_size) {
+            pending_size = qemu_savevm_state_pending(s->file, rlstat.max_size);
+            DPRINTF("pending size %lu max %lu\n",
+                    pending_size, rlstat.max_size);
+            if (pending_size && pending_size >= rlstat.max_size) {
                 qemu_savevm_state_iterate(s->file);
             } else {
                 int ret;
@@ -604,31 +640,10 @@ static void *migration_thread(void *opaque)
             break;
         }
         current_time = qemu_get_clock_ms(rt_clock);
-        if (current_time >= initial_time + BUFFER_DELAY) {
-            uint64_t transferred_bytes = qemu_ftell(s->file) - initial_bytes;
-            uint64_t time_spent = current_time - initial_time;
-            double bandwidth = transferred_bytes / time_spent;
-            max_size = bandwidth * migrate_max_downtime() / 1000000;
-
-            s->mbps = time_spent ? (((double) transferred_bytes * 8.0) /
-                    ((double) time_spent / 1000.0)) / 1000.0 / 1000.0 : -1;
-
-            DPRINTF("transferred %" PRIu64 " time_spent %" PRIu64
-                    " bandwidth %g max_size %" PRId64 "\n",
-                    transferred_bytes, time_spent, bandwidth, max_size);
-            /* if we haven't sent anything, we don't want to recalculate
-               10000 is a small enough number for our purposes */
-            if (s->dirty_bytes_rate && transferred_bytes > 10000) {
-                s->expected_downtime = s->dirty_bytes_rate / bandwidth;
-            }
-
-            qemu_file_reset_rate_limit(s->file);
-            initial_time = current_time;
-            initial_bytes = qemu_ftell(s->file);
-        }
+        migration_update_rate_limit_stat(s, &rlstat, current_time);
         if (qemu_file_rate_limit(s->file)) {
             /* usleep expects microseconds */
-            g_usleep((initial_time + BUFFER_DELAY - current_time)*1000);
+            g_usleep(migration_sleep_time_ms(&rlstat, current_time) * 1000);
         }
     }
 
