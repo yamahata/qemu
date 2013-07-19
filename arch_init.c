@@ -447,6 +447,11 @@ static void migration_bitmap_sync(void)
 
 static uint64_t bytes_transferred;
 
+void ram_save_bulk_stage_done(void)
+{
+    ram_bulk_stage = false;
+}
+
 void ram_save_page_reset(void)
 {
     last_sent_block = NULL;
