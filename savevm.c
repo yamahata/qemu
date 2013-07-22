@@ -135,6 +135,7 @@ struct QEMUFile {
     unsigned int iovcnt;
 
     int last_error;
+    bool thread;
 };
 
 typedef struct QEMUFileStdio
@@ -180,7 +181,7 @@ static int socket_get_buffer(void *opaque, uint8_t *buf, int64_t pos, int size)
         if (len != -1) {
             break;
         }
-        if (socket_error() == EAGAIN) {
+        if (socket_error() == EAGAIN && !s->file->thread) {
             yield_until_fd_readable(s->fd);
         } else if (socket_error() != EINTR) {
             break;
@@ -226,7 +227,7 @@ static int stdio_get_buffer(void *opaque, uint8_t *buf, int64_t pos, int size)
         if (bytes != 0 || !ferror(fp)) {
             break;
         }
-        if (errno == EAGAIN) {
+        if (errno == EAGAIN && !s->file->thread) {
             yield_until_fd_readable(fileno(fp));
         } else if (errno != EINTR) {
             break;
@@ -382,7 +383,7 @@ static int unix_get_buffer(void *opaque, uint8_t *buf, int64_t pos, int size)
         if (len != -1) {
             break;
         }
-        if (errno == EAGAIN) {
+        if (errno == EAGAIN && !s->file->thread) {
             yield_until_fd_readable(s->fd);
         } else if (errno != EINTR) {
             break;
@@ -576,6 +577,11 @@ static void qemu_file_set_error(QEMUFile *f, int ret)
     if (f->last_error == 0) {
         f->last_error = ret;
     }
+}
+
+void qemu_file_set_thread(QEMUFile *f, bool thread)
+{
+    f->thread = thread;
 }
 
 static inline bool qemu_file_is_writable(QEMUFile *f)
