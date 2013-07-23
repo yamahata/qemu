@@ -60,6 +60,7 @@ struct MigrationState
     QEMUFile *file_read;        /* connection from the detination */
     PostcopyOutgoingState *postcopy;
     int precopy_count;
+    bool force_postcopy_phase;
 };
 
 struct MigrationRateLimitStat
