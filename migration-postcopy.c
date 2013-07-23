@@ -265,6 +265,12 @@ static void postcopy_outgoing_free_req(QEMUUMemReq *req)
  * outgoing part
  */
 
+void qmp_migrate_force_postcopy_phase(Error **errp)
+{
+    MigrationState *ms = migrate_get_current();
+    ms->force_postcopy_phase = true;
+}
+
 int postcopy_outgoing_create_read_socket(MigrationState *s, int fd)
 {
     int flags;
@@ -300,6 +306,7 @@ void postcopy_outgoing_state_begin(QEMUFile *f, const MigrationParams *params)
     if (params->precopy_count > 0) {
         options |= POSTCOPY_OPTION_PRECOPY;
     }
+    migrate_get_current()->force_postcopy_phase = false;
 
     qemu_put_ubyte(f, QEMU_VM_POSTCOPY_INIT);
     qemu_put_be32(f, sizeof(options));
@@ -318,7 +325,7 @@ int postcopy_outgoing_ram_save_iterate(QEMUFile *f, void *opaque)
 {
     int ret;
     MigrationState *ms = migrate_get_current();
-    if (ms->params.precopy_count == 0) {
+    if (ms->params.precopy_count == 0 || ms->force_postcopy_phase) {
         qemu_put_be64(f, RAM_SAVE_FLAG_EOS);
         return 1;
     }
@@ -363,7 +370,8 @@ uint64_t postcopy_outgoing_ram_save_pending(QEMUFile *f, void *opaque,
 {
     MigrationState *ms = migrate_get_current();
     if (ms->params.precopy_count > 0 &&
-        ms->precopy_count < ms->params.precopy_count) {
+        ms->precopy_count < ms->params.precopy_count &&
+        !ms->force_postcopy_phase) {
         return ram_save_pending(f, opaque, max_size);
     }
     return 0;

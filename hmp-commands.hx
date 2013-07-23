@@ -980,6 +980,21 @@ Enable/Disable the usage of a capability @var{capability} for migration.
 ETEXI
 
     {
+        .name       = "migrate_force_postcopy_phase",
+        .args_type  = "",
+        .params     = "",
+        .help       = "forcibly move to postcopy phase from precopy phase",
+        .mhandler.cmd = hmp_migrate_force_postcopy_phase,
+    },
+
+STEXI
+@item migrate_force_postcopy_phase
+@findex migrate_force_postcopy_phase
+Forcibly move to postcopy phase from precopy phase
+ETEXI
+
+
+    {
         .name       = "client_migrate_info",
         .args_type  = "protocol:s,hostname:s,port:i?,tls-port:i?,cert-subject:s?",
         .params     = "protocol hostname port tls-port cert-subject",
