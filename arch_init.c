@@ -713,7 +713,7 @@ static int ram_save_complete(QEMUFile *f, void *opaque)
     return 0;
 }
 
-static uint64_t ram_save_pending(QEMUFile *f, void *opaque, uint64_t max_size)
+uint64_t ram_save_pending(QEMUFile *f, void *opaque, uint64_t max_size)
 {
     uint64_t remaining_size;
 
