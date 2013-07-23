@@ -1932,6 +1932,17 @@
 { 'command': 'query-migrate-cache-size', 'returns': 'int' }
 
 ##
+# @migrate-force-postcopy-phase
+#
+# Forcibly move to postcopy phase from precopy phase
+#
+# Returns: nothing on success
+#
+# Since: 1.6
+##
+{ 'command': 'migrate-force-postcopy-phase' }
+
+##
 # @ObjectPropertyInfo:
 #
 # @name: the name of the property
