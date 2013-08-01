@@ -95,12 +95,14 @@
  * Capabilities for negotiation.
  */
 #define RDMA_CAPABILITY_PIN_ALL 0x01
+#define RDMA_CAPABILITY_POSTCOPY 0x80
 
 /*
  * Add the other flags above to this list of known capabilities
  * as they are introduced.
  */
-static uint32_t known_capabilities = RDMA_CAPABILITY_PIN_ALL;
+static uint32_t known_capabilities = RDMA_CAPABILITY_PIN_ALL |
+                                     RDMA_CAPABILITY_POSTCOPY;
 
 #define CHECK_ERROR_STATE() \
     do { \
@@ -351,6 +353,7 @@ typedef struct RDMAContext {
     int current_chunk;
 
     bool pin_all;
+    bool postcopy;
 
     /*
      * infiniband-specific variables for opening the device
@@ -2272,7 +2275,7 @@ static void qemu_rdma_cleanup(RDMAContext *rdma)
 }
 
 
-static int qemu_rdma_source_init(RDMAContext *rdma, Error **errp, bool pin_all)
+static int qemu_rdma_source_init(RDMAContext *rdma, Error **errp)
 {
     int ret, idx;
     Error *local_err = NULL, **temp = &local_err;
@@ -2281,7 +2284,8 @@ static int qemu_rdma_source_init(RDMAContext *rdma, Error **errp, bool pin_all)
      * Will be validated against destination's actual capabilities
      * after the connect() completes.
      */
-    rdma->pin_all = pin_all;
+    rdma->pin_all = migrate_rdma_pin_all();
+    rdma->postcopy = migrate_postcopy_outgoing();
 
     ret = qemu_rdma_resolve_host(rdma, temp);
     if (ret) {
@@ -2347,6 +2351,10 @@ static int qemu_rdma_connect(RDMAContext *rdma, Error **errp)
         DPRINTF("Server pin-all memory requested.\n");
         cap.flags |= RDMA_CAPABILITY_PIN_ALL;
     }
+    if (rdma->postcopy) {
+        DPRINTF("Server postcopy requested.\n");
+        cap.flags |= RDMA_CAPABILITY_POSTCOPY;
+    }
 
     caps_to_network(&cap);
 
@@ -2391,8 +2399,14 @@ static int qemu_rdma_connect(RDMAContext *rdma, Error **errp)
                         "Will register memory dynamically.");
         rdma->pin_all = false;
     }
+    if (rdma->postcopy && !(cap.flags & RDMA_CAPABILITY_POSTCOPY)) {
+        ERROR(errp, "Server cannot support postcopy.\n");
+        rdma->postcopy = false;
+        goto err_rdma_source_connect;
+    }
 
     DPRINTF("Pin all memory: %s\n", rdma->pin_all ? "enabled" : "disabled");
+    DPRINTF("Postcopy: %s\n", rdma->postcopy ? "enabled" : "disabled");
 
     rdma_ack_cm_event(cm_event);
 
@@ -2852,6 +2866,9 @@ static int qemu_rdma_accept(RDMAContext *rdma)
     if (cap.flags & RDMA_CAPABILITY_PIN_ALL) {
         rdma->pin_all = true;
     }
+    if (cap.flags & RDMA_CAPABILITY_POSTCOPY) {
+        rdma->postcopy = true;
+    }
 
     rdma->cm_id = cm_event->id;
     verbs = cm_event->id->verbs;
@@ -2859,6 +2876,7 @@ static int qemu_rdma_accept(RDMAContext *rdma)
     rdma_ack_cm_event(cm_event);
 
     DPRINTF("Memory pin all: %s\n", rdma->pin_all ? "enabled" : "disabled");
+    DPRINTF("Postcopy: %s\n", rdma->postcopy ? "enabled" : "disabled");
 
     caps_to_network(&cap);
 
@@ -3453,8 +3471,7 @@ void rdma_start_outgoing_migration(void *opaque,
         goto err;
     }
 
-    ret = qemu_rdma_source_init(rdma, &local_err,
-        s->enabled_capabilities[MIGRATION_CAPABILITY_X_RDMA_PIN_ALL]);
+    ret = qemu_rdma_source_init(rdma, &local_err);
 
     if (ret) {
         goto err;
