@@ -105,6 +105,7 @@ QEMUFileBuf *qemu_fopen_buf_write(void);
 QEMUFile *qemu_fopen_buf_read(uint8_t *buf, size_t size);
 int qemu_get_fd(QEMUFile *f);
 int qemu_fclose(QEMUFile *f);
+int qemu_fclose_null(QEMUFile *f, void *opaque, const QEMUFileOps *ops);
 int64_t qemu_ftell(QEMUFile *f);
 void qemu_put_buffer(QEMUFile *f, const uint8_t *buf, int size);
 void qemu_put_byte(QEMUFile *f, int v);
@@ -114,6 +115,9 @@ void qemu_put_byte(QEMUFile *f, int v);
  */
 void qemu_put_buffer_async(QEMUFile *f, const uint8_t *buf, int size);
 bool qemu_file_mode_is_not_valid(const char *mode);
+extern const QEMUFileOps rdma_read_ops;
+extern const QEMUFileOps rdma_write_ops;
+bool qemu_file_is_rdma(const QEMUFile *f);
 void *qemu_file_opaque(QEMUFile *f);
 
 static inline void qemu_put_ubyte(QEMUFile *f, unsigned int v)
