@@ -635,6 +635,11 @@ QEMUFile *qemu_fopen_ops(void *opaque, const QEMUFileOps *ops)
     return f;
 }
 
+bool qemu_file_is_rdma(const QEMUFile *f)
+{
+    return f->ops == &rdma_read_ops || f->ops == &rdma_write_ops;
+}
+
 void *qemu_file_opaque(QEMUFile *f)
 {
     return f->opaque;
@@ -792,15 +797,7 @@ void qemu_update_position(QEMUFile *f, size_t size)
     f->pos += size;
 }
 
-/** Closes the file
- *
- * Returns negative error value if any error happened on previous operations or
- * while closing the file. Returns 0 or positive number on success.
- *
- * The meaning of return value on success depends on the specific backend
- * being used.
- */
-int qemu_fclose(QEMUFile *f)
+static int qemu_fclose_nofree(QEMUFile *f)
 {
     int ret;
     qemu_fflush(f);
@@ -818,9 +815,37 @@ int qemu_fclose(QEMUFile *f)
     if (f->last_error) {
         ret = f->last_error;
     }
+    return ret;
+}
+
+/** Closes the file
+ *
+ * Returns negative error value if any error happened on previous operations or
+ * while closing the file. Returns 0 or positive number on success.
+ *
+ * The meaning of return value on success depends on the specific backend
+ * being used.
+ */
+int qemu_fclose(QEMUFile *f)
+{
+    int ret = qemu_fclose_nofree(f);
     g_free(f);
     return ret;
 }
+
+/* Hack to avoid double qemu_fclose() */
+static const QEMUFileOps null_ops = {
+    /* all NULL */
+};
+
+int qemu_fclose_null(QEMUFile *f, void *opaque, const QEMUFileOps *ops)
+{
+    int ret = qemu_fclose_nofree(f);
+    f->ops = ops? ops: &null_ops;
+    f->opaque = opaque;
+    return ret;
+}
+
 
 static void add_to_iovec(QEMUFile *f, const uint8_t *buf, int size)
 {
