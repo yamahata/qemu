@@ -325,6 +325,9 @@ typedef struct RDMAContext {
     int port;
 
     RDMAWorkRequestData wr_data[RDMA_WRID_MAX];
+    uint8_t file_data[RDMA_CONTROL_MAX_BUFFER];
+    size_t data_len;
+    uint8_t *data_curr;
 
     /*
      * This is used by *_exchange_send() to figure out whether or not
@@ -900,6 +903,7 @@ static int qemu_rdma_resolve_host(RDMAContext *rdma, Error **errp)
         ERROR(errp, "could not create CM channel");
         return -EINVAL;
     }
+    DPRINTF("qemu_rdma_resolve_host create_event_channel\n");
 
     /* create CM id */
     ret = rdma_create_id(rdma->channel, &rdma->cm_id, NULL, RDMA_PS_TCP);
@@ -907,6 +911,7 @@ static int qemu_rdma_resolve_host(RDMAContext *rdma, Error **errp)
         ERROR(errp, "could not create channel id");
         goto err_resolve_create_id;
     }
+    DPRINTF("qemu_rdma_resolve_host rdma_create_id\n");
 
     snprintf(port_str, 16, "%d", rdma->port);
     port_str[15] = '\0';
@@ -916,6 +921,7 @@ static int qemu_rdma_resolve_host(RDMAContext *rdma, Error **errp)
         ERROR(errp, "could not rdma_getaddrinfo address %s", rdma->host);
         goto err_resolve_get_addr;
     }
+    DPRINTF("qemu_rdma_resolve_host getaddrinfo\n");
 
     for (e = res; e != NULL; e = e->ai_next) {
         inet_ntop(e->ai_family,
@@ -932,6 +938,7 @@ static int qemu_rdma_resolve_host(RDMAContext *rdma, Error **errp)
             goto route;
         }
     }
+    DPRINTF("qemu_rdma_resolve_host rdma_resolve_addr\n");
 
     ERROR(errp, "could not resolve address %s", rdma->host);
     goto err_resolve_get_addr;
@@ -944,6 +951,7 @@ route:
         ERROR(errp, "could not perform event_addr_resolved");
         goto err_resolve_get_addr;
     }
+    DPRINTF("qemu_rdma_resolve_host rdma_get_cm_event\n");
 
     if (cm_event->event != RDMA_CM_EVENT_ADDR_RESOLVED) {
         ERROR(errp, "result not equal to event_addr_resolved %s",
@@ -2549,6 +2557,8 @@ static int qemu_rdma_put_buffer(void *opaque, const uint8_t *buf,
         head.len = r->len;
         head.type = RDMA_CONTROL_QEMU_FILE;
 
+        DPRINTF("qemu_rdma_put_buffer size %zx remaining %zx\n",
+                r->len, remaining);
         ret = qemu_rdma_exchange_send(rdma, &head, data, NULL, NULL, NULL);
 
         if (ret < 0) {
@@ -2562,19 +2572,18 @@ static int qemu_rdma_put_buffer(void *opaque, const uint8_t *buf,
     return size;
 }
 
-static size_t qemu_rdma_fill(RDMAContext *rdma, uint8_t *buf,
-                             int size, int idx)
+static size_t qemu_rdma_fill(RDMAContext *rdma, uint8_t *buf, int size)
 {
     size_t len = 0;
 
-    if (rdma->wr_data[idx].control_len) {
+    if (rdma->data_len) {
         DDDPRINTF("RDMA %" PRId64 " of %d bytes already in buffer\n",
-                    rdma->wr_data[idx].control_len, size);
+                    rdma->data_len, size);
 
-        len = MIN(size, rdma->wr_data[idx].control_len);
-        memcpy(buf, rdma->wr_data[idx].control_curr, len);
-        rdma->wr_data[idx].control_curr += len;
-        rdma->wr_data[idx].control_len -= len;
+        len = MIN(size, rdma->data_len);
+        memcpy(buf, rdma->file_data, len);
+        rdma->data_curr += len;
+        rdma->data_len -= len;
     }
 
     return len;
@@ -2600,7 +2609,7 @@ static int qemu_rdma_get_buffer(void *opaque, uint8_t *buf,
      * were given and dish out the bytes until we run
      * out of bytes.
      */
-    r->len = qemu_rdma_fill(r->rdma, buf, size, 0);
+    r->len = qemu_rdma_fill(r->rdma, buf, size);
     if (r->len) {
         return r->len;
     }
@@ -2615,11 +2624,15 @@ static int qemu_rdma_get_buffer(void *opaque, uint8_t *buf,
         rdma->error_state = ret;
         return ret;
     }
+    rdma->data_curr = rdma->file_data;
+    rdma->data_len = rdma->wr_data[RDMA_WRID_READY].control_len;
+    memcpy(rdma->file_data, rdma->wr_data[RDMA_WRID_READY].control_curr,
+           rdma->data_len);
 
     /*
      * SEND was received with new bytes, now try again.
      */
-    return qemu_rdma_fill(r->rdma, buf, size, 0);
+    return qemu_rdma_fill(r->rdma, buf, size);
 }
 
 /*
@@ -3430,6 +3443,7 @@ void rdma_start_outgoing_migration(void *opaque,
     RDMAContext *rdma = qemu_rdma_data_init(host_port, &local_err);
     int ret = 0;
 
+    DPRINTF("rdma_start_outgoing_migration\n");
     if (rdma == NULL) {
         ERROR(temp, "Failed to initialize RDMA data structures! %d", ret);
         goto err;
