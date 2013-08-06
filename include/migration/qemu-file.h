@@ -114,6 +114,7 @@ void qemu_put_byte(QEMUFile *f, int v);
  */
 void qemu_put_buffer_async(QEMUFile *f, const uint8_t *buf, int size);
 bool qemu_file_mode_is_not_valid(const char *mode);
+void *qemu_file_opaque(QEMUFile *f);
 
 static inline void qemu_put_ubyte(QEMUFile *f, unsigned int v)
 {
