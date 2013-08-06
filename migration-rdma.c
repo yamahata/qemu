@@ -2928,8 +2928,8 @@ err_rdma_dest_wait:
     return ret;
 }
 
-static int qemu_rdma_ram_block_handle(RDMAContext *rdma,
-                                       RDMAControlHeader *blocks)
+static int qemu_rdma_ram_blocks_request(RDMAContext *rdma,
+                                        RDMAControlHeader *blocks)
 {
     RDMALocalBlocks *local = &rdma->local_ram_blocks;
     int ret;
@@ -3044,7 +3044,7 @@ static int qemu_rdma_registration_handle(QEMUFile *f, void *opaque,
 
         case RDMA_CONTROL_RAM_BLOCKS_REQUEST:
             DPRINTF("Initial setup info requested.\n");
-            ret = qemu_rdma_ram_block_handle(rdma, &blocks);
+            ret = qemu_rdma_ram_blocks_request(rdma, &blocks);
             if (ret) {
                 goto out;
             }
@@ -3184,6 +3184,76 @@ static int qemu_rdma_registration_start(QEMUFile *f, void *opaque,
     return 0;
 }
 
+static int qemu_rdma_ram_blocks_result(RDMAContext *rdma,
+                                       const RDMAControlHeader *resp,
+                                       Error **errp)
+{
+    int nb_remote_blocks;
+    RDMALocalBlocks *local = &rdma->local_ram_blocks;
+    int i;
+
+    if (resp->type != RDMA_CONTROL_RAM_BLOCKS_RESULT) {
+        return -EINVAL;
+    }
+
+    nb_remote_blocks = resp->len / sizeof(RDMARemoteBlock);
+
+    /*
+     * The protocol uses two different sets of rkeys (mutually exclusive):
+     * 1. One key to represent the virtual address of the entire ram block.
+     *    (dynamic chunk registration disabled - pin everything with one rkey.)
+     * 2. One to represent individual chunks within a ram block.
+     *    (dynamic chunk registration enabled - pin individual chunks.)
+     *
+     * Once the capability is successfully negotiated, the destination transmits
+     * the keys to use (or sends them later) including the virtual addresses
+     * and then propagates the remote ram block descriptions to his local copy.
+     */
+
+    if (local->nb_blocks != nb_remote_blocks) {
+        ERROR(errp, "ram blocks mismatch #1! "
+              "Your QEMU command line parameters are probably "
+              "not identical on both the source and destination.");
+        return -EINVAL;
+    }
+
+    memcpy(rdma->block, resp + 1, resp->len);
+    for (i = 0; i < nb_remote_blocks; i++) {
+        int j;
+        network_to_remote_block(&rdma->block[i]);
+
+        /* search local ram blocks */
+        for (j = 0; j < local->nb_blocks; j++) {
+            if (rdma->block[i].offset != local->block[j].offset) {
+                continue;
+            }
+
+            if (rdma->block[i].length != local->block[j].length) {
+                ERROR(errp, "ram blocks mismatch #2! "
+                      "Your QEMU command line parameters are probably "
+                      "not identical on both the source and destination.");
+                return -EINVAL;
+            }
+            local->block[j].remote_host_addr =
+                rdma->block[i].remote_host_addr;
+            local->block[j].remote_rkey = rdma->block[i].remote_rkey;
+            break;
+        }
+
+        if (j >= local->nb_blocks) {
+            ERROR(errp, "ram blocks mismatch #3! "
+                  "Your QEMU command line parameters are probably "
+                  "not identical on both the source and destination.");
+            return -EINVAL;
+        }
+        if (i != j) {
+            DPRINTF("%s:%d\n", __func__, __LINE__);
+            return -EINVAL;
+        }
+    }
+    return 0;
+}
+
 /*
  * Inform dest that dynamic registrations are done for now.
  * First, flush writes, if any.
@@ -3208,8 +3278,7 @@ static int qemu_rdma_registration_stop(QEMUFile *f, void *opaque,
 
     if (flags == RAM_CONTROL_SETUP) {
         RDMAControlHeader resp = {.type = RDMA_CONTROL_RAM_BLOCKS_RESULT };
-        RDMALocalBlocks *local = &rdma->local_ram_blocks;
-        int reg_result_idx, i, j, nb_remote_blocks;
+        int reg_result_idx;
 
         head.type = RDMA_CONTROL_RAM_BLOCKS_REQUEST;
         DPRINTF("Sending registration setup for ram blocks...\n");
@@ -3230,57 +3299,11 @@ static int qemu_rdma_registration_stop(QEMUFile *f, void *opaque,
             return ret;
         }
 
-        nb_remote_blocks = resp.len / sizeof(RDMARemoteBlock);
-
-        /*
-         * The protocol uses two different sets of rkeys (mutually exclusive):
-         * 1. One key to represent the virtual address of the entire ram block.
-         *    (dynamic chunk registration disabled - pin everything with one rkey.)
-         * 2. One to represent individual chunks within a ram block.
-         *    (dynamic chunk registration enabled - pin individual chunks.)
-         *
-         * Once the capability is successfully negotiated, the destination transmits
-         * the keys to use (or sends them later) including the virtual addresses
-         * and then propagates the remote ram block descriptions to his local copy.
-         */
-
-        if (local->nb_blocks != nb_remote_blocks) {
-            ERROR(errp, "ram blocks mismatch #1! "
-                        "Your QEMU command line parameters are probably "
-                        "not identical on both the source and destination.");
-            return -EINVAL;
-        }
-
-        qemu_rdma_move_header(rdma, reg_result_idx, &resp);
-        memcpy(rdma->block,
-            rdma->wr_data[reg_result_idx].control_curr, resp.len);
-        for (i = 0; i < nb_remote_blocks; i++) {
-            network_to_remote_block(&rdma->block[i]);
-
-            /* search local ram blocks */
-            for (j = 0; j < local->nb_blocks; j++) {
-                if (rdma->block[i].offset != local->block[j].offset) {
-                    continue;
-                }
-
-                if (rdma->block[i].length != local->block[j].length) {
-                    ERROR(errp, "ram blocks mismatch #2! "
-                        "Your QEMU command line parameters are probably "
-                        "not identical on both the source and destination.");
-                    return -EINVAL;
-                }
-                local->block[j].remote_host_addr =
-                        rdma->block[i].remote_host_addr;
-                local->block[j].remote_rkey = rdma->block[i].remote_rkey;
-                break;
-            }
-
-            if (j >= local->nb_blocks) {
-                ERROR(errp, "ram blocks mismatch #3! "
-                        "Your QEMU command line parameters are probably "
-                        "not identical on both the source and destination.");
-                return -EINVAL;
-            }
+        ret = qemu_rdma_ram_blocks_result(
+            rdma, (RDMAControlHeader*)rdma->wr_data[reg_result_idx].control,
+            errp);
+        if (ret) {
+            return ret;
         }
     }
 
