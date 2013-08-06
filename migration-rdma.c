@@ -2928,6 +2928,48 @@ err_rdma_dest_wait:
     return ret;
 }
 
+static int qemu_rdma_ram_block_handle(RDMAContext *rdma,
+                                       RDMAControlHeader *blocks)
+{
+    RDMALocalBlocks *local = &rdma->local_ram_blocks;
+    int ret;
+    int i;
+
+    blocks->type = RDMA_CONTROL_RAM_BLOCKS_RESULT;
+    blocks->repeat = 1;
+    if (rdma->pin_all) {
+        ret = qemu_rdma_reg_whole_ram_blocks(rdma);
+        if (ret) {
+            fprintf(stderr, "rdma migration: error dest "
+                    "registering ram blocks!\n");
+            return ret;
+        }
+    }
+
+    /*
+     * Dest uses this to prepare to transmit the RAMBlock descriptions
+     * to the source VM after connection setup.
+     * Both sides use the "remote" structure to communicate and update
+     * their "local" descriptions with what was sent.
+     */
+    for (i = 0; i < local->nb_blocks; i++) {
+        rdma->block[i].remote_host_addr =
+            (uint64_t)(local->block[i].local_host_addr);
+
+        if (rdma->pin_all) {
+            rdma->block[i].remote_rkey = local->block[i].mr->rkey;
+        }
+
+        rdma->block[i].offset = local->block[i].offset;
+        rdma->block[i].length = local->block[i].length;
+
+        remote_block_to_network(&rdma->block[i]);
+    }
+
+    blocks->len = local->nb_blocks * sizeof(rdma->block[0]);
+    return 0;
+}
+
 /*
  * During each iteration of the migration, we listen for instructions
  * by the source VM to perform dynamic page registrations before they
@@ -2948,11 +2990,9 @@ static int qemu_rdma_registration_handle(QEMUFile *f, void *opaque,
                                .type = RDMA_CONTROL_UNREGISTER_FINISHED,
                                .repeat = 0,
                              };
-    RDMAControlHeader blocks = { .type = RDMA_CONTROL_RAM_BLOCKS_RESULT,
-                                 .repeat = 1 };
+    RDMAControlHeader blocks;
     QEMUFileRDMA *rfile = opaque;
     RDMAContext *rdma = rfile->rdma;
-    RDMALocalBlocks *local = &rdma->local_ram_blocks;
     RDMAControlHeader head;
     RDMARegister *reg, *registers;
     RDMACompress *comp;
@@ -2963,7 +3003,6 @@ static int qemu_rdma_registration_handle(QEMUFile *f, void *opaque,
     int ret = 0;
     int idx = 0;
     int count = 0;
-    int i = 0;
 
     CHECK_ERROR_STATE();
 
@@ -3005,39 +3044,10 @@ static int qemu_rdma_registration_handle(QEMUFile *f, void *opaque,
 
         case RDMA_CONTROL_RAM_BLOCKS_REQUEST:
             DPRINTF("Initial setup info requested.\n");
-
-            if (rdma->pin_all) {
-                ret = qemu_rdma_reg_whole_ram_blocks(rdma);
-                if (ret) {
-                    fprintf(stderr, "rdma migration: error dest "
-                                    "registering ram blocks!\n");
-                    goto out;
-                }
+            ret = qemu_rdma_ram_block_handle(rdma, &blocks);
+            if (ret) {
+                goto out;
             }
-
-            /*
-             * Dest uses this to prepare to transmit the RAMBlock descriptions
-             * to the source VM after connection setup.
-             * Both sides use the "remote" structure to communicate and update
-             * their "local" descriptions with what was sent.
-             */
-            for (i = 0; i < local->nb_blocks; i++) {
-                rdma->block[i].remote_host_addr =
-                    (uint64_t)(local->block[i].local_host_addr);
-
-                if (rdma->pin_all) {
-                    rdma->block[i].remote_rkey = local->block[i].mr->rkey;
-                }
-
-                rdma->block[i].offset = local->block[i].offset;
-                rdma->block[i].length = local->block[i].length;
-
-                remote_block_to_network(&rdma->block[i]);
-            }
-
-            blocks.len = rdma->local_ram_blocks.nb_blocks
-                                                * sizeof(RDMARemoteBlock);
-
 
             ret = qemu_rdma_post_send_control(rdma,
                                         (uint8_t *) rdma->block, &blocks);
