@@ -635,6 +635,11 @@ QEMUFile *qemu_fopen_ops(void *opaque, const QEMUFileOps *ops)
     return f;
 }
 
+void *qemu_file_opaque(QEMUFile *f)
+{
+    return f->opaque;
+}
+
 int qemu_file_get_error(QEMUFile *f)
 {
     return f->last_error;
