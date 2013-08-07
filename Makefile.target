@@ -124,6 +124,7 @@ obj-y += dump.o
 LIBS+=$(libs_softmmu)
 
 obj-y += migration-postcopy.o umem.o
+obj-$(CONFIG_RDMA) += migration-rdma.o
 
 # xen support
 obj-$(CONFIG_XEN) += xen-all.o xen-mapcache.o
