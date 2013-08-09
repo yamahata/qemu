@@ -53,6 +53,7 @@ int ram_load_page(QEMUFile *f, void *host, int flags);
 int ram_save_iterate(QEMUFile *f);
 
 #if defined(NEED_CPU_H) && !defined(CONFIG_USER_ONLY)
+bool migration_bitmap_test_and_reset_dirty(MemoryRegion *mr, ram_addr_t offset);
 void ram_save_bulk_stage_done(void);
 void ram_save_set_last_seen_block(RAMBlock *block, ram_addr_t offset);
 RAMBlock *ram_find_block(const char *id, uint8_t len);
