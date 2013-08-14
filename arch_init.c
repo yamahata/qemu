@@ -488,8 +488,10 @@ void ram_save_page_reset(void)
 
 /*
  * ram_save_page: Writes a page of memory to the stream f
+ *  0: success
+ * -1: eagain
  */
-static void ram_save_page_do(QEMUFile *f, RAMBlock *block, ram_addr_t offset,
+static bool ram_save_page_do(QEMUFile *f, RAMBlock *block, ram_addr_t offset,
                              bool disable_xbzrle, bool last_stage)
 {
     uint8_t *p = memory_region_get_ram_ptr(block->mr) + offset;
@@ -502,7 +504,10 @@ static void ram_save_page_do(QEMUFile *f, RAMBlock *block, ram_addr_t offset,
                                 offset, TARGET_PAGE_SIZE, &bytes_sent);
 
     if (ret != RAM_SAVE_CONTROL_NOT_SUPP) {
-        if (ret != RAM_SAVE_CONTROL_DELAYED) {
+        if (ret == RAM_SAVE_CONTROL_EAGAIN) {
+            migration_bitmap_set_dirty(block->mr, offset);
+            return -1;
+        } else if (ret != RAM_SAVE_CONTROL_DELAYED) {
             if (bytes_sent > 0) {
                 acct_info.norm_pages++;
             } else if (bytes_sent == 0) {
@@ -537,14 +542,17 @@ static void ram_save_page_do(QEMUFile *f, RAMBlock *block, ram_addr_t offset,
         bytes_transferred += bytes_sent;
         last_sent_block = block;
     }
+    return 0;
 }
 
 void ram_save_page(QEMUFile *f, RAMBlock *block, ram_addr_t offset)
 {
+    int ret;
     if (!migration_bitmap_test_and_reset_dirty(block->mr, offset)) {
         return;
     }
-    ram_save_page_do(f, block, offset, true, true);
+    ret = ram_save_page_do(f, block, offset, true, true);
+    assert(ret == 0);
 }
 
 
@@ -581,8 +589,12 @@ bool ram_save_block(QEMUFile *f, bool disable_xbzrle, bool last_stage)
                 migrate_get_current()->precopy_count++;
             }
         } else {
-            ram_save_page_do(f, block, offset,
-                             disable_xbzrle || ram_bulk_stage, last_stage);
+            int ret = ram_save_page_do(f, block, offset,
+                                       disable_xbzrle || ram_bulk_stage,
+                                       last_stage);
+            if (ret && offset > 0) {
+                offset -= TARGET_PAGE_SIZE;
+            }
             wrote = true;
             break;
         }
