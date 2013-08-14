@@ -73,6 +73,8 @@
 #define RDMA_SIGNALED_SEND_MAX (RDMA_MERGE_MAX / 4096)
 
 #define RDMA_REG_CHUNK_SHIFT 20 /* 1 MB */
+#define RDMA_REG_CHUNK_SIZE (1UL << RDMA_REG_CHUNK_SHIFT)
+#define RDMA_REG_CHUNK_MASK (~(RDMA_REG_CHUNK_SIZE -1))
 
 /*
  * This is only for non-live state being migrated.
