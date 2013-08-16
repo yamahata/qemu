@@ -1130,8 +1130,7 @@ static int qemu_rdma_search_ram_block(RDMAContext *rdma,
  */
 static int qemu_rdma_register_and_get_keys(RDMAContext *rdma,
         RDMALocalBlock *block, uint8_t *host_addr,
-        uint32_t *lkey, uint32_t *rkey, int chunk,
-        uint8_t *chunk_start, uint8_t *chunk_end)
+        uint32_t *lkey, uint32_t *rkey, int chunk)
 {
     if (block->mr) {
         if (lkey) {
@@ -1157,6 +1156,8 @@ static int qemu_rdma_register_and_get_keys(RDMAContext *rdma,
      * If 'lkey', then we're the source VM, so grant access only to ourselves.
      */
     if (!block->pmr[chunk]) {
+        uint8_t *chunk_start = ram_chunk_start(block, chunk);
+        uint8_t *chunk_end = ram_chunk_end(block, chunk);
         uint64_t len = chunk_end - chunk_start;
 
         DDPRINTF("Registering %" PRIu64 " bytes @ %p\n",
@@ -1851,7 +1852,6 @@ static int qemu_rdma_write_one(QEMUFile *f, RDMAContext *rdma,
     struct ibv_send_wr *bad_wr;
     int reg_result_idx, ret, count = 0;
     uint64_t chunk, chunks;
-    uint8_t *chunk_start, *chunk_end;
     RDMALocalBlock *block = &(rdma->local_ram_blocks.block[current_index]);
     RDMARegister reg;
     RDMARegisterResult *reg_result;
@@ -1867,7 +1867,6 @@ retry:
     sge.length = length;
 
     chunk = ram_chunk_index(block->local_host_addr, (uint8_t *) sge.addr);
-    chunk_start = ram_chunk_start(block, chunk);
 
     if (block->is_ram_block) {
         chunks = length / (1UL << RDMA_REG_CHUNK_SHIFT);
@@ -1885,8 +1884,6 @@ retry:
 
     DDPRINTF("Writing %" PRIu64 " chunks, (%" PRIu64 " MB)\n",
         chunks + 1, (chunks + 1) * (1UL << RDMA_REG_CHUNK_SHIFT) / 1024 / 1024);
-
-    chunk_end = ram_chunk_end(block, chunk + chunks);
 
     if (!rdma->pin_all) {
 #ifdef RDMA_UNREGISTRATION_EXAMPLE
@@ -1976,8 +1973,7 @@ retry:
             /* try to overlap this single registration with the one we sent. */
             if (qemu_rdma_register_and_get_keys(rdma, block,
                                                 (uint8_t *) sge.addr,
-                                                &sge.lkey, NULL, chunk,
-                                                chunk_start, chunk_end)) {
+                                                &sge.lkey, NULL, chunk)) {
                 fprintf(stderr, "cannot get lkey!\n");
                 return -EINVAL;
             }
@@ -1997,8 +1993,7 @@ retry:
             /* already registered before */
             if (qemu_rdma_register_and_get_keys(rdma, block,
                                                 (uint8_t *)sge.addr,
-                                                &sge.lkey, NULL, chunk,
-                                                chunk_start, chunk_end)) {
+                                                &sge.lkey, NULL, chunk)) {
                 fprintf(stderr, "cannot get lkey!\n");
                 return -EINVAL;
             }
@@ -2009,8 +2004,7 @@ retry:
         send_wr.wr.rdma.rkey = block->remote_rkey;
 
         if (qemu_rdma_register_and_get_keys(rdma, block, (uint8_t *)sge.addr,
-                                                     &sge.lkey, NULL, chunk,
-                                                     chunk_start, chunk_end)) {
+                                                     &sge.lkey, NULL, chunk)) {
             fprintf(stderr, "cannot get lkey!\n");
             return -EINVAL;
         }
@@ -3066,7 +3060,6 @@ static int qemu_rdma_registration_handle(QEMUFile *f, void *opaque,
 
             for (count = 0; count < head.repeat; count++) {
                 uint64_t chunk;
-                uint8_t *chunk_start, *chunk_end;
 
                 reg = &registers[count];
                 network_to_register(reg);
@@ -3088,11 +3081,9 @@ static int qemu_rdma_registration_handle(QEMUFile *f, void *opaque,
                     host_addr = block->local_host_addr +
                         (reg->key.chunk * (1UL << RDMA_REG_CHUNK_SHIFT));
                 }
-                chunk_start = ram_chunk_start(block, chunk);
-                chunk_end = ram_chunk_end(block, chunk + reg->chunks);
                 if (qemu_rdma_register_and_get_keys(rdma, block,
                             (uint8_t *)host_addr, NULL, &reg_result->rkey,
-                            chunk, chunk_start, chunk_end)) {
+                            chunk)) {
                     fprintf(stderr, "cannot get rkey!\n");
                     ret = -EINVAL;
                     goto out;
