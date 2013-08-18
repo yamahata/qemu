@@ -2499,11 +2499,10 @@ err_dest_init_create_listen_id:
 static void *qemu_rdma_data_init(const char *host_port, Error **errp)
 {
     RDMAContext *rdma = NULL;
-    InetSocketAddress *addr;
+    InetSocketAddress *addr = NULL;
 
     if (host_port) {
         rdma = g_malloc0(sizeof(RDMAContext));
-        memset(rdma, 0, sizeof(RDMAContext));
         rdma->current_index = -1;
         rdma->current_chunk = -1;
 
@@ -2514,10 +2513,15 @@ static void *qemu_rdma_data_init(const char *host_port, Error **errp)
         } else {
             ERROR(errp, "bad RDMA migration address '%s'", host_port);
             g_free(rdma);
-            return NULL;
+            rdma = NULL;
         }
     }
 
+    if (addr != NULL) {
+        g_free(addr->host);
+        g_free(addr->port);
+        g_free(addr);
+    }
     return rdma;
 }
 
