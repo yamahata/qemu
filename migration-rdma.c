@@ -4226,16 +4226,16 @@ static int postcopy_rdma_outgoing_alloc_pd_cq_qp(
     int ret;
 
     uint32_t scqe =
-        /* RDMA WRITE for RDMARequest or RDMA result */
-        RDMA_POSTCOPY_REQ_MAX * MAX_PAGE_NR
+        /* RDMA WRITE for RDMARequest + RDMA result */
+        RDMA_POSTCOPY_REQ_MAX * (MAX_PAGE_NR + 1)
         /* Register request */
         + RDMA_POSTCOPY_REQ_MAX * MAX_PAGE_NR
-        /* RDMA for BG or RDMA result BG */
-        + RDMA_POSTCOPY_REQ_MAX * MAX_PAGE_NR
-        /* RDMA for BG or RDMA result PRE froward */
-        + RDMA_POSTCOPY_REQ_MAX * MAX_PAGE_NR
-        /* RDMA for BG or RDMA result PRE backward */
-        + RDMA_POSTCOPY_REQ_MAX * MAX_PAGE_NR
+        /* RDMA for BG + RDMA result BG */
+        + RDMA_POSTCOPY_REQ_MAX * (MAX_PAGE_NR + 1)
+        /* RDMA for BG + RDMA result PRE froward */
+        + RDMA_POSTCOPY_REQ_MAX * (MAX_PAGE_NR + 1)
+        /* RDMA for BG + RDMA result PRE backward */
+        + RDMA_POSTCOPY_REQ_MAX * (MAX_PAGE_NR + 1)
         /* for EOS */
         + 1;
     uint32_t rcqe =
