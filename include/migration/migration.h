@@ -20,6 +20,7 @@
 #include "qemu/notify.h"
 #include "qapi/error.h"
 #include "migration/vmstate.h"
+#include "migration/rdma.h"
 #include "qapi-types.h"
 #include "exec/cpu-common.h"
 
@@ -61,6 +62,7 @@ struct MigrationState
     PostcopyOutgoingState *postcopy;
     int precopy_count;
     bool force_postcopy_phase;
+    RDMAPostcopyOutgoing *rdma_outgoing;
 };
 
 struct MigrationRateLimitStat
