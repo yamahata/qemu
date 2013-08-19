@@ -61,6 +61,8 @@ struct UMemBlock {
                                            in TARGET_PAGE_SIZE */
     unsigned long *phys_received;       /* thread to read from outgoing qemu
                                            in TARGET_PAGE_SIZE */
+    unsigned long nr_pending_clean;     /* protected by pending_clean_mutex */
+    unsigned long *pending_clean_bitmap;/* protected by pending_clean_mutex */
 };
 #endif
 typedef struct UMemBlock UMemBlock;
