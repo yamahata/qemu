@@ -36,6 +36,7 @@
 #include "hw/hw.h"
 #include "sysemu/arch_init.h"
 #include "migration/migration.h"
+#include "migration/rdma.h"
 #include "migration/postcopy.h"
 #include "qemu/sockets.h"
 #include "qemu/thread.h"
@@ -126,7 +127,8 @@ static void postcopy_incoming_send_req_one(QEMUFile *f, const QEMUUMemReq *req)
  * nr: 2
  */
 #define MAX_PAGE_NR     ((32 * 1024 - 1 - 1 - 256 - 2) / sizeof(uint64_t))
-static void postcopy_incoming_send_req(QEMUFile *f, const QEMUUMemReq *req)
+static void postcopy_file_incoming_send_req(QEMUFile *f,
+                                            const QEMUUMemReq *req)
 {
     uint32_t nr = req->nr;
     QEMUUMemReq tmp = *req;
@@ -155,6 +157,20 @@ static void postcopy_incoming_send_req(QEMUFile *f, const QEMUUMemReq *req)
     default:
         abort();
         break;
+    }
+}
+
+/* TODO: use function pointer */
+static void postcopy_incoming_send_req(QEMUFile *f,
+                                       RDMAPostcopyIncoming *rdma,
+                                       const QEMUUMemReq *req,
+                                       const UMemBlock *block)
+{
+    assert(!!f ^ !!rdma);
+    if (f) {
+        postcopy_file_incoming_send_req(f, req);
+    } else if (rdma) {
+        postcopy_rdma_incoming_send_req(rdma, req, block);
     }
 }
 
@@ -271,6 +287,7 @@ void qmp_migrate_force_postcopy_phase(Error **errp)
     ms->force_postcopy_phase = true;
 }
 
+/* Should not call this when RDMA case. It is handled specifically */
 int postcopy_outgoing_create_read_socket(MigrationState *s, int fd)
 {
     int flags;
@@ -612,7 +629,7 @@ PostcopyOutgoingState *postcopy_outgoing_begin(MigrationState *ms)
     s->state = PO_STATE_ACTIVE;
     s->last_block_read = NULL;
 
-    if (ms->params.precopy_count > 0) {
+    if (ms->params.precopy_count > 0 && !qemu_file_is_rdma(ms->file)) {
         postcopy_outgoing_send_clean_bitmap(ms->file);
     }
     qemu_fflush(ms->file);
@@ -625,6 +642,10 @@ void postcopy_outgoing_cleanup(MigrationState *ms)
     migration_bitmap_free();
     if (!migrate_postcopy_outgoing()) {
         return;
+    }
+    if (ms->rdma_outgoing) {
+        postcopy_rdma_outgoing_cleanup(ms->rdma_outgoing);
+        ms->rdma_outgoing = NULL;
     }
     if (ms->file_read) {
         qemu_fclose(ms->file_read);
@@ -793,21 +814,41 @@ static int postcopy_outgoing_loop(MigrationState *ms,
     return 0;
 }
 
+static int postcopy_outgoing_file(MigrationState *ms,
+                                  MigrationRateLimitStat *rlstat)
+{
+    int ret = postcopy_outgoing_loop(ms, rlstat);
+    if (qemu_file_get_error(ms->file_read)) {
+        qemu_file_set_error(ms->file, qemu_file_get_error(ms->file_read));
+    }
+    if (qemu_file_get_error(ms->file)) {
+        return -1;
+    }
+    return ret;
+}
+
 int postcopy_outgoing(MigrationState *ms, MigrationRateLimitStat *rlstat)
 {
-    PostcopyOutgoingState *s = ms->postcopy;
     int ret = 0;
+    PostcopyOutgoingState *s = ms->postcopy;
+    int (*loop)(MigrationState *ms, MigrationRateLimitStat *rlstat);
 
-    DPRINTF("postcopy outgoing\n");
+    DPRINTF("postcopy outgoing prefault"
+            " forward %"PRId64" backward %"PRId64"\n",
+            ms->params.prefault_forward, ms->params.prefault_backward);
+    if (qemu_file_is_rdma(ms->file)) {
+        ret = postcopy_rdma_outgoing(ms, rlstat);
+        if (ret) {
+            return ret;
+        }
+        loop = postcopy_rdma_outgoing_loop;
+    } else {
+        loop = postcopy_outgoing_file;
+    }
+
     while (s->state != PO_STATE_ERROR_RECEIVE &&
            s->state != PO_STATE_COMPLETED) {
-        ret = postcopy_outgoing_loop(ms, rlstat);
-        if (qemu_file_get_error(ms->file_read)) {
-            qemu_file_set_error(ms->file, qemu_file_get_error(ms->file_read));
-        }
-        if (qemu_file_get_error(ms->file)) {
-            ret = -1;
-        }
+        ret = (*loop)(ms, rlstat);
         if (ret < 0) {
             break;
         }
@@ -935,6 +976,9 @@ struct PostcopyIncomingUMemDaemon {
     int fault_read_fd;          /* qemu on destination -> umem daemon */
     ssize_t offset;
     uint64_t buf[PIPE_BUF / sizeof(uint64_t)];
+
+    /* rdma */
+    RDMAPostcopyIncoming *rdma;
 };
 typedef struct PostcopyIncomingUMemDaemon PostcopyIncomingUMemDaemon;
 
@@ -956,6 +1000,7 @@ static PostcopyIncomingUMemDaemon umemd = {
     .blocks = QLIST_HEAD_INITIALIZER(&umemd.blocks),
     .mig_read = NULL,
     .mig_write = NULL,
+    .rdma = NULL,
 };
 
 static void postcopy_incoming_umemd(void);
@@ -1094,6 +1139,7 @@ int postcopy_incoming_prepare(UMemBlockHead **umem_blocks)
 {
     int error = 0;
     RAMBlock *block;
+    int block_index = 0;
 
     if (!QLIST_EMPTY(&umemd.blocks)) {
         goto out;
@@ -1132,6 +1178,9 @@ int postcopy_incoming_prepare(UMemBlockHead **umem_blocks)
             goto error;
         }
         umem_block = g_malloc0(sizeof(*umem_block));
+        umem_block->block_index = block_index;
+        block_index++;
+
         umem_block->umem = umem;
         umem_block->offset = block->offset;
         umem_block->length = block->length;
@@ -1166,6 +1215,7 @@ static int postcopy_incoming_loadvm_init(QEMUFile *f, uint32_t size)
     int flags;
     int error;
 
+    DPRINTF("postcopy_incoming_loadvm_init\n");
     if (size != sizeof(options)) {
         fprintf(stderr, "unknown size %d\n", size);
         return -EINVAL;
@@ -1182,7 +1232,7 @@ static int postcopy_incoming_loadvm_init(QEMUFile *f, uint32_t size)
         return -ENOSYS;
     }
     flags = fcntl(qemu_get_fd(f), F_GETFL);
-    if ((flags & O_ACCMODE) != O_RDWR) {
+    if (!qemu_file_is_rdma(f) && (flags & O_ACCMODE) != O_RDWR) {
         /* postcopy requires read/write file descriptor */
         fprintf(stderr, "non-writable connection. "
                 "postcopy requires read/write connection \n");
@@ -1215,7 +1265,9 @@ static int postcopy_incoming_create_umemd(QEMUFile *mig_read)
     int qemu_fault_read_fd;
     int qemu_fault_write_fd;
     pid_t child;
-    assert((fcntl(qemu_get_fd(mig_read), F_GETFL) & O_ACCMODE) == O_RDWR);
+    bool is_rdma = qemu_file_is_rdma(mig_read);
+    assert(is_rdma ||
+           (fcntl(qemu_get_fd(mig_read), F_GETFL) & O_ACCMODE) == O_RDWR);
 
     if (qemu_pipe(fds) == -1) {
         perror("qemu_pipe");
@@ -1244,6 +1296,15 @@ static int postcopy_incoming_create_umemd(QEMUFile *mig_read)
     }
     umemd.fault_read_fd = fds[0];
     qemu_fault_write_fd = fds[1];
+
+    if (is_rdma) {
+        qemu_fclose_null(mig_read, NULL, NULL);
+        /* ibverb isn't compatible with fork.
+         * Child process will again establish connection again.
+         * Or swap the role of child and parent. (This way would confuses
+         * management program like libvirt)
+         */
+    }
 
     child = fork();
     if (child < 0) {
@@ -1282,24 +1343,28 @@ static int postcopy_incoming_create_umemd(QEMUFile *mig_read)
             block->pending_clean_bitmap =
                 bitmap_new(block->length >> umemd.host_page_shift);
         }
-
-        /* process_incoming_migration set mig_read to non-blocking
-         * mode with corouting for qmp working.
-         * Here we switches to its dedicated thread and it expects
-         * blocking mode. Otherwise it results in assert by
-         * yield_until_fd_readable()
-         */
         qemu_file_set_thread(mig_read, true);
-        qemu_set_block(qemu_get_fd(mig_read));
-        umemd.mig_read = mig_read;
+        if (is_rdma) {
+            /* setup rdma connection again */
+            umemd.rdma = postcopy_rdma_incoming_init(&umemd.blocks,
+                                                     umemd.precopy_enabled);
+        } else {
+            /* process_incoming_migration set mig_read to non-blocking
+             * mode with corouting for qmp working.
+             * Here we switches to its dedicated thread and it expects
+             * blocking mode. Otherwise it results in assert by
+             * yield_until_fd_readable()
+             */
+            qemu_set_block(qemu_get_fd(mig_read));
+            umemd.mig_read = mig_read;
 
-        mig_write_fd = dup(qemu_get_fd(mig_read));
-        if (mig_write_fd < 0) {
-            perror("could not dup for writable socket \n");
-            return -errno;
+            mig_write_fd = dup(qemu_get_fd(mig_read));
+            if (mig_write_fd < 0) {
+                perror("could not dup for writable socket \n");
+                return -errno;
+            }
+            umemd.mig_write = qemu_fdopen(mig_write_fd, "wb");
         }
-        umemd.mig_write = qemu_fdopen(mig_write_fd, "wb");
-
         qemu_set_nonblock(umemd.fault_write_fd);
 
         postcopy_incoming_umemd();      /* noreturn */
@@ -1618,7 +1683,7 @@ static void postcopy_incoming_umem_check_eoc_req(void)
 
     if (umemd.mig_write != NULL) {
         req.cmd = QEMU_UMEM_REQ_EOC;
-        postcopy_incoming_send_req(umemd.mig_write, &req);
+        postcopy_incoming_send_req(umemd.mig_write, umemd.rdma, &req, NULL);
         qemu_fclose(umemd.mig_write);
         umemd.mig_write = NULL;
     }
@@ -1725,9 +1790,12 @@ static int postcopy_incoming_umem_send_page_req(UMemBlock *block)
             return error;
         }
     }
-    if (req.nr > 0 && umemd.mig_write != NULL) {
-        postcopy_incoming_send_req(umemd.mig_write, &req);
-        umemd.last_block_write = block;
+    if (req.nr > 0) {
+        if (umemd.mig_write != NULL || umemd.rdma != NULL) {
+            postcopy_incoming_send_req(umemd.mig_write, umemd.rdma, &req,
+                                       block);
+            umemd.last_block_write = block;
+        }
     }
     return 0;
 }
@@ -2286,7 +2354,12 @@ static int postcopy_incoming_umemd_mig_read_init(void)
         return 0;
     }
 
-    ret = postcopy_file_incoming_umemd_read_clean_bitmap();
+    if (umemd.rdma != NULL) {
+        ret = postcopy_rdma_incoming_umemd_read_clean_bitmap(umemd.rdma,
+                                                             &umemd.blocks);
+    } else {
+        ret = postcopy_file_incoming_umemd_read_clean_bitmap();
+    }
     if (ret) {
         return ret;
     }
@@ -2307,10 +2380,17 @@ static int postcopy_incoming_umemd_mig_read_loop(void)
     int error;
     /* read thread doesn't need to check periodically UMEM_STATE_EOC_SEND_REQ
      * because RAM_SAVE_FLAG_EOS is always sent by the outgoing part. */
-    if (umemd.mig_read == NULL) {
-        return -EINVAL;
+
+    if (umemd.rdma != NULL) {
+        /* TODO: use function pointer */
+        error = postcopy_rdma_incoming_recv(umemd.rdma);
+    } else {
+        if (umemd.mig_read == NULL) {
+            return -EINVAL;
+        }
+        error = postcopy_incoming_umem_ram_load();
     }
-    error = postcopy_incoming_umem_ram_load();
+
     if (error) {
         postcopy_incoming_umem_error_req();
     }
@@ -2633,6 +2713,10 @@ static void postcopy_incoming_umemd(void)
     qemu_mutex_destroy(&umemd.pending_clean_mutex);
     qemu_cond_destroy(&umemd.pending_clean_cond);
     assert(umemd.nr_pending_clean == 0);
+
+    if (umemd.rdma) {
+        postcopy_rdma_incoming_cleanup(umemd.rdma);
+    }
 
     DPRINTF("umemd done\n");
     /* This daemon forked from qemu and the parent qemu is still running.

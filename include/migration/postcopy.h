@@ -96,6 +96,9 @@ struct UMemBlock {
     unsigned long *clean_bitmap;
     unsigned long nr_pending_clean;     /* protected by pending_clean_mutex */
     unsigned long *pending_clean_bitmap;/* protected by pending_clean_mutex */
+
+    /* for rdma */
+    int block_index;                    /* index to RDMALocalBlcoks::block */
 };
 #endif
 typedef struct UMemBlock UMemBlock;

@@ -11,13 +11,27 @@
  * later.  See the COPYING file in the top-level directory.
  *
  */
+/*
+ * RDMA postcopy
+ * Copyright (c) 2013
+ * National Institute of Advanced Industrial Science and Technology
+ *
+ * https://sites.google.com/site/grivonhome/quick-kvm-migration
+ * Author: Isaku Yamahata  <isaku.yamahata at gmail com>
+ *
+ * This work is licensed under the terms of the GNU GPL, version 2 or
+ * later.  See the COPYING file in the top-level directory.
+ */
 #include "qemu-common.h"
 #include "migration/migration.h"
 #include "migration/qemu-file.h"
+#include "migration/rdma.h"
+#include "migration/postcopy.h"
 #include "exec/cpu-common.h"
 #include "qemu/main-loop.h"
 #include "qemu/sockets.h"
 #include "qemu/bitmap.h"
+#include "sysemu/arch_init.h"
 #include "block/coroutine.h"
 #include <stdio.h>
 #include <sys/types.h>
@@ -189,6 +203,57 @@ enum {
     RDMA_CONTROL_REGISTER_FINISHED,   /* current iteration finished */
     RDMA_CONTROL_UNREGISTER_REQUEST,  /* dynamic UN-registration */
     RDMA_CONTROL_UNREGISTER_FINISHED, /* unpinning finished */
+
+    /* postcopy related messages */
+
+    /* outgoing -> incoming */
+    /* RDMA_CONTROL_REGISTER_REQUEST, */
+    /* RDMA_CONTROL_UNREGISTER_REQUEST,*/  /* RDMA write is completed.
+                                            * unregister target page.
+                                            * no replay from incoming side
+                                            */
+    RDMA_CONTROL_EOS,                 /* outgoing -> incoming
+                                       * end of session
+                                       * No data
+                                       */
+    RDMA_CONTROL_RDMA_RESULT,         /* outgoing->incoming
+                                       * RDMA write completion
+                                       * RDMARequest with rkey unused
+                                       */
+    RDMA_CONTROL_RDMA_RESULT_BG,      /* outgoing->incoming
+                                       * RDMA write completion
+                                       * RDMARequest with rkey unused
+                                       * incoming side will reply with READY
+                                       */
+    RDMA_CONTROL_RDMA_RESULT_PRE,     /* outgoing->incoming
+                                       * prefault RDMA write completion
+                                       * RDMARequest with rkey unused
+                                       * window control is done by
+                                       * RDMA_CONTROL_RDMA_RESULT
+                                       */
+    RDMA_CONTROL_REGISTER_AREQUEST,   /* outgoing -> incoming
+                                       * asynchronous dynamic page registration
+                                       */
+    RDMA_CONTROL_BITMAP_RESULT,       /* outgoing -> incoming
+                                       * clean bitmap for pre+post copy
+                                       * RDMARequest
+                                       */
+    /* incoming -> outgoing */
+    RDMA_CONTROL_RDMA_REQUEST,        /* request to start RDMA write
+                                       * RDMARequest
+                                       */
+    RDMA_CONTROL_REGISTER_ARESULT,    /* incoming -> outgoing
+                                       * asynchronous result to
+                                       * RDMA_CONTROL_REGISTER_ASYNC
+                                       */
+    RDMA_CONTROL_EOC,                 /* end of connection
+                                       * outgoing part will close the channel
+                                       * No data
+                                       */
+    RDMA_CONTROL_BITMAP_REQUEST,      /* incoming -> outgoing
+                                       * clean bitmap for pre+post copy
+                                       * RDMARequest
+                                       */
 };
 
 const char *control_desc[] = {
@@ -204,6 +269,18 @@ const char *control_desc[] = {
     [RDMA_CONTROL_REGISTER_FINISHED] = "REGISTER FINISHED",
     [RDMA_CONTROL_UNREGISTER_REQUEST] = "UNREGISTER REQUEST",
     [RDMA_CONTROL_UNREGISTER_FINISHED] = "UNREGISTER FINISHED",
+
+    /* postcopy */
+    [RDMA_CONTROL_EOS] = "EOS",
+    [RDMA_CONTROL_RDMA_RESULT] = "RDMA RESULT",
+    [RDMA_CONTROL_RDMA_RESULT_BG] = "RDMA RESULT BG",
+    [RDMA_CONTROL_RDMA_RESULT_PRE] = "RDMA RESULT PRE",
+    [RDMA_CONTROL_REGISTER_AREQUEST] = "ASYNC REGISTER REQUEST",
+    [RDMA_CONTROL_BITMAP_RESULT] = "BITMAP RESULT",
+    [RDMA_CONTROL_RDMA_REQUEST] = "RDMA REQUEST",
+    [RDMA_CONTROL_REGISTER_ARESULT] = "ASYNC REGISTER RESULT",
+    [RDMA_CONTROL_EOC] = "RDMA EOC",
+    [RDMA_CONTROL_BITMAP_REQUEST] = "BITMAP REQUEST",
 };
 
 /*
@@ -258,6 +335,18 @@ typedef struct RDMALocalBlock {
     int      nb_chunks;
     unsigned long *transit_bitmap;
     unsigned long *unregister_bitmap;
+
+    /* for postcopy outgoing */
+    RAMBlock *ram_block;
+    unsigned int *nb_rdma;
+    uint64_t *clean_bitmap;
+
+    /* for postcopy incoming */
+    UMemBlock *umem_block;
+
+    /* for postcopy outgoing/incoming */
+    int bit;
+    struct ibv_mr *bitmap_key;  /* for clean bitmap */
 } RDMALocalBlock;
 
 /*
@@ -518,6 +607,8 @@ static int qemu_rdma_exchange_send(RDMAContext *rdma, RDMAControlHeader *head,
                                    uint8_t *data, RDMAControlHeader *resp,
                                    int *resp_idx,
                                    int (*callback)(RDMAContext *rdma));
+static void postcopy_rdma_incoming_prepare_ram_block(
+    RDMAContext *rdma, UMemBlockHead *umem_blcoks);
 
 static inline uint64_t ram_chunk_index(const uint8_t *start,
                                        const uint8_t *host)
@@ -581,13 +672,15 @@ static int __qemu_rdma_add_block(RDMAContext *rdma, void *host_addr,
     block->unregister_bitmap = bitmap_new(block->nb_chunks);
     bitmap_clear(block->unregister_bitmap, 0, block->nb_chunks);
     block->remote_keys = g_malloc0(block->nb_chunks * sizeof(uint32_t));
+    block->bit = -1;
 
     block->is_ram_block = local->init ? false : true;
 
     g_hash_table_insert(rdma->blockmap, (void *) block_offset, block);
 
-    DDPRINTF("Added Block: %d, addr: %" PRIu64 ", offset: %" PRIu64
-           " length: %" PRIu64 " end: %" PRIu64 " bits %" PRIu64 " chunks %d\n",
+    DDPRINTF("Added Block: %d, addr: 0x%" PRIx64 ", offset: 0x%" PRIx64
+           " length: 0x%" PRIx64 " end: 0x%" PRIx64
+             " bits %" PRIu64" chunks %d\n",
             local->nb_blocks, (uint64_t) block->local_host_addr, block->offset,
             block->length, (uint64_t) (block->local_host_addr + block->length),
                 BITS_TO_LONGS(block->nb_chunks) *
@@ -667,6 +760,9 @@ static int __qemu_rdma_delete_block(RDMAContext *rdma, ram_addr_t block_offset)
 
     g_free(block->remote_keys);
     block->remote_keys = NULL;
+
+    g_free(block->nb_rdma);
+    block->nb_rdma = NULL;
 
     for (x = 0; x < local->nb_blocks; x++) {
         g_hash_table_remove(rdma->blockmap, (void *)old[x].offset);
@@ -2243,7 +2339,7 @@ static void qemu_rdma_cleanup(RDMAContext *rdma)
     }
 
     if (rdma->qp) {
-        ibv_destroy_qp(rdma->qp);
+        rdma_destroy_qp(rdma->cm_id);
         rdma->qp = NULL;
     }
     if (rdma->cq) {
@@ -2286,6 +2382,10 @@ static int qemu_rdma_source_init(RDMAContext *rdma, Error **errp)
      */
     rdma->pin_all = migrate_rdma_pin_all();
     rdma->postcopy = migrate_postcopy_outgoing();
+    if (rdma->pin_all && rdma->postcopy) {
+        ERROR(temp, "rdma migration: rdma postcopy doesn't support pin-all\n");
+        goto err_rdma_source_init;
+    }
 
     ret = qemu_rdma_resolve_host(rdma, temp);
     if (ret) {
@@ -2443,6 +2543,7 @@ static int qemu_rdma_dest_init(RDMAContext *rdma, Error **errp)
         rdma->error_state = -EINVAL;
         return -1;
     }
+    ibv_fork_init();    /* for postcopy to fork */
     /* create CM channel */
     rdma->channel = rdma_create_event_channel();
     if (!rdma->channel) {
@@ -2510,11 +2611,18 @@ err_dest_init_create_listen_id:
 
 }
 
+/* to tell rdma postcopy host_port */
+static char *current_host_port = NULL;
+
 static void *qemu_rdma_data_init(const char *host_port, Error **errp)
 {
     RDMAContext *rdma = NULL;
     InetSocketAddress *addr = NULL;
 
+    if (host_port != current_host_port) {
+        g_free(current_host_port);
+        current_host_port = g_strdup(host_port);
+    }
     if (host_port) {
         rdma = g_malloc0(sizeof(RDMAContext));
         rdma->current_index = -1;
@@ -2568,6 +2676,7 @@ static int qemu_rdma_put_buffer(void *opaque, const uint8_t *buf,
 
     while (remaining) {
         RDMAControlHeader head;
+        uint8_t *tmp;
 
         r->len = MIN(remaining, RDMA_SEND_INCREMENT);
         remaining -= r->len;
@@ -2575,9 +2684,12 @@ static int qemu_rdma_put_buffer(void *opaque, const uint8_t *buf,
         head.len = r->len;
         head.type = RDMA_CONTROL_QEMU_FILE;
 
-        DPRINTF("qemu_rdma_put_buffer size %zx remaining %zx\n",
-                r->len, remaining);
+        DPRINTF("qemu_rdma_put_buffer size %zd remaining %zd "
+                "0x%x 0x%x 0x%x 0x%x\n",
+                r->len, remaining, data[0], data[1], data[2], data[3]);
         ret = qemu_rdma_exchange_send(rdma, &head, data, NULL, NULL, NULL);
+        tmp = rdma->wr_data[RDMA_WRID_CONTROL].control;
+        tmp += sizeof(RDMAControlHeader);
 
         if (ret < 0) {
             rdma->error_state = ret;
@@ -2596,10 +2708,10 @@ static size_t qemu_rdma_fill(RDMAContext *rdma, uint8_t *buf, int size)
 
     if (rdma->data_len) {
         DDDPRINTF("RDMA %" PRId64 " of %d bytes already in buffer\n",
-                    rdma->data_len, size);
+                  rdma->data_len, size);
 
         len = MIN(size, rdma->data_len);
-        memcpy(buf, rdma->file_data, len);
+        memcpy(buf, rdma->data_curr, len);
         rdma->data_curr += len;
         rdma->data_len -= len;
     }
@@ -2644,8 +2756,11 @@ static int qemu_rdma_get_buffer(void *opaque, uint8_t *buf,
     }
     rdma->data_curr = rdma->file_data;
     rdma->data_len = rdma->wr_data[RDMA_WRID_READY].control_len;
-    memcpy(rdma->file_data, rdma->wr_data[RDMA_WRID_READY].control_curr,
+    assert(rdma->data_len <= RDMA_CONTROL_MAX_BUFFER);
+    assert(rdma->data_len <= sizeof(rdma->file_data));
+    memcpy(rdma->data_curr, rdma->wr_data[RDMA_WRID_READY].control_curr,
            rdma->data_len);
+    DDDPRINTF("RDMA QEMU FILE recv %"PRId64"\n", rdma->data_len);
 
     /*
      * SEND was received with new bytes, now try again.
@@ -2832,6 +2947,7 @@ static int qemu_rdma_accept(RDMAContext *rdma)
     struct ibv_context *verbs;
     int ret = -EINVAL;
     int idx;
+    UMemBlockHead *umem_blocks;
 
     ret = rdma_get_cm_event(rdma->channel, &cm_event);
     if (ret) {
@@ -2868,6 +2984,10 @@ static int qemu_rdma_accept(RDMAContext *rdma)
     }
     if (cap.flags & RDMA_CAPABILITY_POSTCOPY) {
         rdma->postcopy = true;
+        ret = postcopy_incoming_prepare(&umem_blocks);
+        if (ret) {
+            goto err_rdma_dest_wait;
+        }
     }
 
     rdma->cm_id = cm_event->id;
@@ -2908,6 +3028,9 @@ static int qemu_rdma_accept(RDMAContext *rdma)
     if (ret) {
         fprintf(stderr, "rdma migration: error initializing ram blocks!\n");
         goto err_rdma_dest_wait;
+    }
+    if (rdma->postcopy) {
+        postcopy_rdma_incoming_prepare_ram_block(rdma, umem_blocks);
     }
 
     for (idx = 0; idx < RDMA_WRID_MAX; idx++) {
@@ -3218,7 +3341,10 @@ static int qemu_rdma_ram_blocks_result(RDMAContext *rdma,
     RDMALocalBlocks *local = &rdma->local_ram_blocks;
     int i;
 
+    DPRINTF("%s:%d len %x type %x repeat %d\n", __func__, __LINE__,
+            resp->len, resp->type, resp->repeat);
     if (resp->type != RDMA_CONTROL_RAM_BLOCKS_RESULT) {
+        DPRINTF("%s:%d type 0x%x\n", __func__, __LINE__, resp->type);
         return -EINVAL;
     }
 
@@ -3237,6 +3363,7 @@ static int qemu_rdma_ram_blocks_result(RDMAContext *rdma,
      */
 
     if (local->nb_blocks != nb_remote_blocks) {
+        DPRINTF("%s:%d\n", __func__, __LINE__);
         ERROR(errp, "ram blocks mismatch #1! "
               "Your QEMU command line parameters are probably "
               "not identical on both the source and destination.");
@@ -3493,4 +3620,3497 @@ err:
     error_propagate(errp, local_err);
     g_free(rdma);
     migrate_fd_error(s);
+}
+
+/****************************************************************************
+ * RDMA Postcopy
+ */
+
+#define RDMA_POSTCOPY_VERSION_CURRENT   1
+/* too large number may result in error when creating cq/qp */
+/* #define RDMA_POSTCOPY_REQ_MAX           64 */
+#define RDMA_POSTCOPY_REQ_MAX           16
+#define RDMA_POSTCOPY_REPLAY_THRESHOLD (RDMA_POSTCOPY_REQ_MAX / 2)
+#define RDMA_POSTCOPY_BG_CHECK          32
+
+/*
+ * from migration-postcopy.c
+ * #define MAX_PAGE_NR     ((32 * 1024 - 1 - 1 - 256 - 2) / sizeof(uint64_t))
+ * adjust to RDMARegister
+ */
+#define RDMA_POSTCOPY_REQUEST_MAX_BUFFER        (128 * 1024)
+/* #define MAX_PAGE_NR     ((RDMA_POSTCOPY_REQUEST_MAX_BUFFER - sizeof(RDMAControlHeader)) / sizeof(RDMARequest)) */       /* too large causing ENOMEM */
+#define MAX_PAGE_NR     4       /* to exercise window control */
+
+typedef struct QEMU_PACKED
+{
+    uint32_t block_index;
+    uint32_t rkey;              /* unused when RDMA_CONTROL_RDMA_RESULT */
+    uint64_t host_addr;         /* virtual address of incoming side
+                                 * Event when RDMA_CONTROL_RDMA_RESULT
+                                 * i.e. host_addr is of incoming side.
+                                 * Not outgoing side.
+                                 */
+    uint64_t length;
+} RDMARequest;
+
+#define RDMA_POSTCOPY_RDMA_REQUEST_MAX  \
+        ((RDMA_POSTCOPY_REQUEST_MAX_BUFFER - sizeof(RDMAControlHeader)) / \
+         sizeof(RDMARequest))
+
+static void request_to_network(RDMARequest *req)
+{
+    req->block_index = htonl(req->block_index);
+    req->rkey = htonl(req->rkey);
+    req->host_addr = htonll(req->host_addr);
+    req->length = htonll(req->length);
+}
+
+static void network_to_request(RDMARequest *req)
+{
+    req->block_index = ntohl(req->block_index);
+    req->rkey = ntohl(req->rkey);
+    req->host_addr = ntohll(req->host_addr);
+    req->length = ntohll(req->length);
+}
+
+typedef struct QEMU_PAM_H
+{
+    uint64_t chunk;
+    uint32_t block_index;
+    uint32_t rkey;      /* valid only when _RESULT. */
+} RDMAAsyncRegister;
+
+#define RDMA_POSTCOPY_RDMA_AREGISTER_MAX \
+    ((RDMA_POSTCOPY_REQUEST_MAX_BUFFER - sizeof(RDMAControlHeader) / \
+      sizeof(RDMAAsyncRegister)))
+
+static void aregister_to_network(RDMAAsyncRegister *reg)
+{
+    reg->chunk = ntohll(reg->chunk);
+    reg->block_index = ntohl(reg->block_index);
+    reg->rkey = ntohl(reg->rkey);
+}
+
+static void network_to_aregister(RDMAAsyncRegister *reg)
+{
+    reg->chunk = htonll(reg->chunk);
+    reg->block_index = htonl(reg->block_index);
+    reg->rkey = htonl(reg->rkey);
+}
+
+struct RDMAPostcopyData
+{
+    struct ibv_mr *mr;
+    uint8_t *data;
+};
+typedef struct RDMAPostcopyData RDMAPostcopyData;
+
+struct RDMAPostcopyBuffer
+{
+    RDMAPostcopyData **free;
+    unsigned int inuse;
+    unsigned int size;
+    RDMAPostcopyData *data;
+
+    struct ibv_qp *qp;
+    struct ibv_cq *cq;
+    struct ibv_comp_channel *channel;
+};
+typedef struct RDMAPostcopyBuffer RDMAPostcopyBuffer;
+
+static RDMAPostcopyBuffer*
+postcopy_rdma_buffer_init(struct ibv_pd *pd,
+                          struct ibv_qp *qp, struct ibv_cq *cq,
+                          struct ibv_comp_channel *channel,
+                          unsigned int size, bool remote_writable)
+{
+    int i;
+    const int pagesize = getpagesize();
+    int access = IBV_ACCESS_LOCAL_WRITE |
+        (remote_writable? IBV_ACCESS_REMOTE_WRITE: 0);
+    RDMAPostcopyBuffer *buffer = g_malloc0(sizeof(*buffer));
+    buffer->free = g_malloc0(sizeof(buffer->free[0]) * size);
+    buffer->size = size;
+    buffer->data = g_malloc(sizeof(buffer->data[0]) * size);
+
+    for (i = 0; i < size; i++) {
+        buffer->data[i].data = qemu_memalign(pagesize,
+                                             RDMA_POSTCOPY_REQUEST_MAX_BUFFER);
+        buffer->data[i].mr = ibv_reg_mr(
+            pd, buffer->data[i].data, RDMA_POSTCOPY_REQUEST_MAX_BUFFER,
+            access);
+        if (buffer->data[i].mr == NULL) {
+            goto error;
+        }
+
+        buffer->free[i] = &buffer->data[i];
+    }
+
+    buffer->inuse = 0;
+    buffer->qp = qp;
+    buffer->cq = cq;
+    buffer->channel = channel;
+    DPRINTF("%s:%d qp %p cq %p ch %p %d\n",
+            __func__, __LINE__, qp, cq, channel, size);
+    return buffer;
+
+error:
+    for (; i >= 0; i--) {
+        ibv_dereg_mr(buffer->data[i].mr);
+        g_free(buffer->data[i].data);
+    }
+    g_free(buffer->data);
+    g_free(buffer->free);
+    g_free(buffer);
+    return NULL;
+}
+
+static void postcopy_rdma_buffer_destroy(RDMAPostcopyBuffer *buffer)
+{
+    int i;
+    for (i = 0; i < buffer->size; i++) {
+        ibv_dereg_mr(buffer->data[i].mr);
+        g_free(buffer->data[i].data);
+    }
+    g_free(buffer->data);
+    g_free(buffer->free);
+    g_free(buffer);
+}
+
+static RDMAPostcopyData*
+postcopy_rdma_buffer_alloc(RDMAPostcopyBuffer *buffer)
+{
+    RDMAPostcopyData* ret = buffer->free[buffer->inuse];
+
+    assert(buffer->inuse < buffer->size);
+    buffer->inuse++;
+    return ret;
+}
+
+static void postcopy_rdma_buffer_free(RDMAPostcopyBuffer *buffer,
+                                      RDMAPostcopyData *data)
+{
+    assert(0 < buffer->inuse);
+    assert(buffer->inuse <= buffer->size);
+    buffer->inuse--;
+    buffer->free[buffer->inuse] = data;
+}
+
+static bool postcopy_rdma_buffer_empty(const RDMAPostcopyBuffer *buffer)
+{
+    return buffer->inuse == buffer->size;
+}
+
+static uint32_t postcopy_rdma_buffer_get_index(
+    const RDMAPostcopyBuffer *buffer, const RDMAPostcopyData *data)
+{
+    int index = data - buffer->data;
+    assert(0 <= index);
+    assert(index < buffer->size);
+    return index;
+}
+
+static RDMAPostcopyData*
+postcopy_rdma_buffer_get_data(RDMAPostcopyBuffer *buffer, int index)
+{
+    assert(0 <= index);
+    assert(index < buffer->size);
+    return &buffer->data[index];
+}
+
+static int postcopy_rdma_buffer_post_recv_data(RDMAPostcopyBuffer *buffer,
+                                               RDMAPostcopyData *data)
+{
+    int ret;
+    int index = postcopy_rdma_buffer_get_index(buffer, data);
+    struct ibv_recv_wr *bad_wr;
+    struct ibv_sge sge = {.addr = (uint64_t)(data->data),
+                          .length = RDMA_POSTCOPY_REQUEST_MAX_BUFFER,
+                          .lkey = data->mr->lkey,};
+    struct ibv_recv_wr recv_wr = {.wr_id = index,
+                                  .sg_list = &sge,
+                                  .num_sge = 1,};
+
+    DDDPRINTF("%s:%d index %d\n", __func__, __LINE__, index);
+    ret = ibv_post_recv(buffer->qp, &recv_wr, &bad_wr);
+    if (ret) {
+        DPRINTF("%s:%d ret %d\n", __func__, __LINE__, ret);
+        abort();
+    }
+    return -ret;
+}
+
+static int postcopy_rdma_buffer_post_recv(RDMAPostcopyBuffer *buffer)
+{
+    RDMAPostcopyData *data = postcopy_rdma_buffer_alloc(buffer);
+    return postcopy_rdma_buffer_post_recv_data(buffer, data);
+}
+
+static int postcopy_rdma_buffer_post_send(RDMAPostcopyBuffer *buffer,
+                                          RDMAPostcopyData *data)
+{
+    RDMAControlHeader *head = (RDMAControlHeader *)data->data;
+    int index = postcopy_rdma_buffer_get_index(buffer, data);
+    struct ibv_send_wr *bad_wr;
+    struct ibv_sge sge = {.addr = (uint64_t)(data->data),
+                          .length = sizeof(*head) + head->len,
+                          .lkey = data->mr->lkey,};
+    struct ibv_send_wr send_wr = {.wr_id = index,
+                                  .sg_list = &sge,
+                                  .num_sge = 1,
+                                  .opcode = IBV_WR_SEND,
+                                  .send_flags = IBV_SEND_SIGNALED,};
+
+    DDDPRINTF("%s:%d index %d len %x type %s 0x%x repeat %d\n",
+              __func__, __LINE__, index,
+              head->len, control_desc[head->type], head->type, head->repeat);
+    assert(head->len < RDMA_POSTCOPY_REQUEST_MAX_BUFFER - sizeof(*head));
+    control_to_network((RDMAControlHeader*)data->data);
+    return -ibv_post_send(buffer->qp, &send_wr, &bad_wr);
+}
+
+static int postcopy_rdma_buffer_post_send_buf(
+    RDMAPostcopyBuffer *buffer, RDMAPostcopyData *data,
+    const RDMAControlHeader *head, const uint8_t *buf)
+{
+    int index = postcopy_rdma_buffer_get_index(buffer, data);
+    struct ibv_send_wr *bad_wr;
+    struct ibv_sge sge = {.addr = (uint64_t)(data->data),
+                          .length = sizeof(*head) + head->len,
+                          .lkey = data->mr->lkey,};
+    struct ibv_send_wr send_wr = {.wr_id = index,
+                                  .sg_list = &sge,
+                                  .num_sge = 1,
+                                  .opcode = IBV_WR_SEND,
+                                  .send_flags = IBV_SEND_SIGNALED,};
+
+    DDDPRINTF("%s:%d index %d len %x type %s %x repeat %d\n",
+              __func__, __LINE__, index,
+              head->len, control_desc[head->type], head->type, head->repeat);
+    assert(head->len < RDMA_POSTCOPY_REQUEST_MAX_BUFFER - sizeof(*head));
+    memcpy(data->data, head, sizeof(*head));
+    control_to_network((RDMAControlHeader*)data->data);
+    if (buf) {
+        memcpy(data->data + sizeof(*head), buf, head->len);
+    }
+    return -ibv_post_send(buffer->qp, &send_wr, &bad_wr);
+}
+
+static int postcopy_rdma_buffer_poll(RDMAPostcopyBuffer *buffer,
+                                     uint64_t *wr_id,
+                                     enum ibv_wc_opcode *opcode,
+                                     RDMAPostcopyData **data)
+{
+    int ret;
+    struct ibv_wc wc;
+    RDMAControlHeader *head;
+
+    ret = ibv_poll_cq(buffer->cq, 1, &wc);
+    if (ret < 0) {
+        DPRINTF("%s:%d ret %d\n", __func__, __LINE__, ret);
+        return ret;
+    }
+    if (ret == 0) {
+        return 0;
+    }
+    assert(ret == 1);
+
+    *wr_id = wc.wr_id;
+    *opcode = wc.opcode;
+    if (wc.status != IBV_WC_SUCCESS) {
+        DPRINTF("error wr_id 0x%"PRIx64" opcode %d status %d %s\n",
+                wc.wr_id, wc.opcode, wc.status, ibv_wc_status_str(wc.status));
+        return -wc.status;
+    }
+
+    switch (wc.opcode) {
+    case IBV_WC_RDMA_WRITE:
+        /* nothing */
+        break;
+    case IBV_WC_SEND:
+        *data = postcopy_rdma_buffer_get_data(buffer, wc.wr_id);
+        break;
+    case IBV_WC_RECV:
+        if (wc.byte_len < sizeof(*head) ||
+            wc.byte_len > RDMA_POSTCOPY_REQUEST_MAX_BUFFER) {
+            return -EINVAL;
+        }
+        *data = postcopy_rdma_buffer_get_data(buffer, wc.wr_id);
+        head = (RDMAControlHeader *)(*data)->data;
+        network_to_control(head);
+        if (head->len != wc.byte_len - sizeof(*head)) {
+            DPRINTF("invalid byte_len %d != %zd + %d\n",
+                    wc.byte_len, sizeof(*head), head->len);
+            return -EINVAL;
+        }
+        switch (head->type) {
+        case RDMA_CONTROL_RAM_BLOCKS_RESULT:
+            /* nothing */
+            break;
+        case RDMA_CONTROL_READY:
+            if (head->len != 0) {
+                DPRINTF("%s:%d\n", __func__, __LINE__);
+                return -EINVAL;
+            }
+            break;
+        case RDMA_CONTROL_EOS:
+        case RDMA_CONTROL_EOC:
+            if (head->len != 0 || head->repeat != 0) {
+                DPRINTF("%s:%d\n", __func__, __LINE__);
+                return -EINVAL;
+            }
+            break;
+        case RDMA_CONTROL_RDMA_REQUEST:
+        case RDMA_CONTROL_RDMA_RESULT_BG:
+        case RDMA_CONTROL_RDMA_RESULT_PRE:
+        case RDMA_CONTROL_BITMAP_REQUEST:
+        case RDMA_CONTROL_BITMAP_RESULT:
+            if (head->repeat == 0) {
+                DPRINTF("%s:%d\n", __func__, __LINE__);
+                return -EINVAL;
+            }
+            /* fall through */
+        case RDMA_CONTROL_RDMA_RESULT:
+            if (head->repeat * sizeof(RDMARequest) != head->len) {
+                DPRINTF("%s:%d\n", __func__, __LINE__);
+                return -EINVAL;
+            }
+            break;
+        case RDMA_CONTROL_REGISTER_AREQUEST:
+            if (head->repeat == 0) {
+                DPRINTF("%s:%d\n", __func__, __LINE__);
+                return -EINVAL;
+            }
+            /* fall through */
+        case RDMA_CONTROL_REGISTER_ARESULT:
+            if (head->repeat * sizeof(RDMAAsyncRegister) != head->len) {
+                DPRINTF("%s:%d\n", __func__, __LINE__);
+                return -EINVAL;
+            }
+            break;
+        default:
+            DPRINTF("unknown type %s\n", control_desc[head->type]);
+            abort();
+            break;
+        }
+        break;
+    default:
+        /* other operations aren't used */
+        DPRINTF("unknown wr_id 0x%"PRIx64" opcode %d status %d %s\n",
+                wc.wr_id, wc.opcode, wc.status, ibv_wc_status_str(wc.status));
+        if (wc.status != IBV_WC_SUCCESS) {
+            return -wc.status;
+        }
+        abort();
+        break;
+    }
+
+    return ret;
+}
+
+static int postcopy_rdma_buffer_get_wc(
+    RDMAPostcopyBuffer *buffer, RDMAPostcopyData **data, RDMAContext *rdma)
+{
+    struct rdma_event_channel *cm_channel = rdma->channel;
+    int ret = 0;
+    int num_cq_events = 0;
+
+    while (true) {
+        uint64_t wr_id;
+        enum ibv_wc_opcode opcode;
+        fd_set fds;
+        int nfds;
+        int ret;
+        struct ibv_cq *cq;
+        void *cq_ctx;
+
+        ret = ibv_req_notify_cq(buffer->cq, 0);
+        if (ret) {
+            ret = -ret;
+            break;
+        }
+        ret = postcopy_rdma_buffer_poll(buffer, &wr_id, &opcode, data);
+        if (ret < 0) {
+            break;
+        }
+        if (ret == 1) {
+            if (opcode != IBV_WC_RECV) {
+                ret = -EINVAL;
+                break;
+            }
+            ret = 0;
+            break;
+        }
+
+        FD_ZERO(&fds);
+        FD_SET(cm_channel->fd, &fds);
+        FD_SET(buffer->channel->fd, &fds);
+        nfds = MAX(cm_channel->fd, buffer->channel->fd);
+        ret = select(nfds + 1, &fds, NULL, NULL, NULL);
+        if (ret < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return ret;
+        }
+        if (FD_ISSET(cm_channel->fd, &fds)) {
+            struct rdma_cm_event *cm_event;
+            ret = rdma_get_cm_event(cm_channel, &cm_event);
+            if (ret) {
+                perror("rdma_get_cm_event\n");
+                DPRINTF("%s:%d ret %d\n", __func__, __LINE__, ret);
+                return ret;
+            }
+            DPRINTF("cm_event %s\n", rdma_event_str(cm_event->event));
+            if (cm_event->event == RDMA_CM_EVENT_DISCONNECTED) {
+                DPRINTF("%s:%d\n", __func__, __LINE__);
+                rdma_ack_cm_event(cm_event);
+                rdma->connected = false;
+                *data = NULL;
+                break;
+            }
+            rdma_ack_cm_event(cm_event);
+        }
+        if (FD_ISSET(buffer->channel->fd, &fds)) {
+            ret = ibv_get_cq_event(buffer->channel, &cq, &cq_ctx);
+            if (ret < 0) {
+                break;
+            }
+            num_cq_events++;
+        }
+    }
+
+    if (num_cq_events) {
+        ibv_ack_cq_events(buffer->cq, num_cq_events);
+    }
+    return ret;
+}
+
+/****************************************************************************
+ * RDMA postcopy outgoing part
+ */
+
+/* TODO:XXX temporal. find best value */
+#define RDMA_POSTCOPY_BG_QUEUED_MAX_BYTES       (16 * 1024 * 1024)
+
+enum RDMA_POSTCOPY_RDMA_TYPE {
+    RDMA_POSTCOPY_RDMA_ONDEMAND = 0,
+    RDMA_POSTCOPY_RDMA_BACKGROUND,
+    RDMA_POSTCOPY_RDMA_PREFAULT,
+    RDMA_POSTCOPY_RDMA_BITMAP,
+};
+typedef enum RDMA_POSTCOPY_RDMA_TYPE RDMA_POSTCOPY_RDMA_TYPE;
+
+struct RDMAPostcopyInflight
+{
+    RDMA_POSTCOPY_RDMA_TYPE rdma_type;
+    unsigned int nb;
+    uint64_t bytes;
+};
+typedef struct RDMAPostcopyInflight RDMAPostcopyInflight;
+
+struct RDMAPostcopySavePage {
+#define RDMA_POSTCOPY_OUTGOING_SAVE_INVALID  (-1)
+    int rdma_index;
+
+    RDMALocalBlock *local_block;
+    struct ibv_sge sge;
+    struct ibv_send_wr wr;
+};
+typedef struct RDMAPostcopySavePage RDMAPostcopySavePage;
+
+struct RDMAPostcopyOutgoing
+{
+    RDMAContext *rdma;
+
+    struct rdma_cm_id *cm_id;
+    struct rdma_event_channel *channel;
+    struct ibv_context *verbs;
+
+    struct ibv_pd *pd;
+    struct ibv_cq *scq;
+    struct ibv_comp_channel *s_comp_channel;
+    struct ibv_cq *rcq;
+    struct ibv_comp_channel *r_comp_channel;
+    struct ibv_qp *qp;
+
+    RDMAPostcopyBuffer *sbuffer;
+    RDMAPostcopyBuffer *rbuffer;
+
+    MigrationState *ms;
+    MigrationRateLimitStat *rlstat;
+
+    RDMAPostcopyInflight *inflight;     /* indexed by sbuffer index */
+
+    unsigned int nb_rdma_total;
+    uint64_t bytes_rdma_total;
+    unsigned int nb_bg_total;
+    uint64_t bytes_bg_total;
+    unsigned int nb_pre_total;
+    uint64_t bytes_pre_total;
+
+    RDMAPostcopySavePage bg_save;
+
+    unsigned int nb_bg_result;
+    unsigned int nb_register;
+    bool bg_break_loop;
+
+    /* the number of register request and rdma_result_bg in flight */
+    unsigned int nb_inflight;
+};
+
+static const QEMUFileOps postcopy_rdma_outgoing_write_ops;
+
+void postcopy_rdma_outgoing_cleanup(RDMAPostcopyOutgoing *outgoing)
+{
+    RDMAContext *rdma = outgoing->rdma;
+    struct rdma_cm_event *cm_event;
+
+    if (rdma && rdma->cm_id && rdma->connected) {
+        int ret = rdma_disconnect(rdma->cm_id);
+        if (!ret) {
+            DDPRINTF("waiting for disconnect\n");
+            ret = rdma_get_cm_event(rdma->channel, &cm_event);
+            if (!ret) {
+                rdma_ack_cm_event(cm_event);
+            }
+        }
+        DDPRINTF("Disconnected.\n");
+        rdma->connected = false;
+    }
+    if (outgoing->qp) {
+        rdma_destroy_qp(outgoing->rdma->cm_id);
+        outgoing->qp = NULL;
+    }
+    if (outgoing->scq) {
+        ibv_destroy_cq(outgoing->scq);
+        outgoing->scq = NULL;
+    }
+    if (outgoing->rcq) {
+        ibv_destroy_cq(outgoing->rcq);
+        outgoing->rcq = NULL;
+    }
+    if (outgoing->s_comp_channel) {
+        ibv_destroy_comp_channel(outgoing->s_comp_channel);
+        outgoing->s_comp_channel = NULL;
+    }
+    if (outgoing->r_comp_channel) {
+        ibv_destroy_comp_channel(outgoing->r_comp_channel);
+        outgoing->r_comp_channel = NULL;
+    }
+    if (outgoing->pd) {
+        ibv_dealloc_pd(outgoing->pd);
+        outgoing->pd = NULL;
+    }
+    if (outgoing->rdma) {
+        qemu_rdma_cleanup(outgoing->rdma);
+        outgoing->rdma = NULL;
+    }
+    if (outgoing->sbuffer) {
+        postcopy_rdma_buffer_destroy(outgoing->sbuffer);
+    }
+    if (outgoing->rbuffer) {
+        postcopy_rdma_buffer_destroy(outgoing->rbuffer);
+    }
+    g_free(rdma);
+    g_free(outgoing->inflight);
+    g_free(outgoing);
+}
+
+static int postcopy_rdma_outgoing_alloc_pd_cq_qp(
+    RDMAPostcopyOutgoing *outgoing)
+{
+    struct RDMAContext *rdma = outgoing->rdma;
+    struct ibv_qp_init_attr attr;
+    int ret;
+
+    uint32_t scqe =
+        /* RDMA WRITE for RDMARequest + RDMA result */
+        RDMA_POSTCOPY_REQ_MAX * (MAX_PAGE_NR + 1)
+        /* Register request */
+        + RDMA_POSTCOPY_REQ_MAX * MAX_PAGE_NR
+        /* RDMA for BG + RDMA result BG */
+        + RDMA_POSTCOPY_REQ_MAX * (MAX_PAGE_NR + 1)
+        /* RDMA for BG + RDMA result PRE froward */
+        + RDMA_POSTCOPY_REQ_MAX * (MAX_PAGE_NR + 1)
+        /* RDMA for BG + RDMA result PRE backward */
+        + RDMA_POSTCOPY_REQ_MAX * (MAX_PAGE_NR + 1)
+        /* for EOS */
+        + 1;
+    uint32_t rcqe =
+        /* for RDMA Request */
+        + RDMA_POSTCOPY_REQ_MAX
+        /* for Register Result */
+        + RDMA_POSTCOPY_REQ_MAX
+        /* for READY */
+        + RDMA_POSTCOPY_REQ_MAX
+        /* for EOC */
+        + 1;
+
+    /* allocate pd */
+    outgoing->pd = ibv_alloc_pd(outgoing->verbs);
+    if (!outgoing->pd) {
+        fprintf(stdout, "failed to allocate protection domain\n");
+        return -1;
+    }
+    rdma->pd = outgoing->pd;    /* qemu_rdma_register_and_get_keys() uses */
+
+    /* create send completion channel */
+    outgoing->s_comp_channel = ibv_create_comp_channel(outgoing->verbs);
+    if (!outgoing->s_comp_channel) {
+        fprintf(stdout, "failed to allocate send completion channel\n");
+        goto err_alloc_pd_cq;
+    }
+    outgoing->scq = ibv_create_cq(outgoing->verbs,
+                                  scqe, NULL, outgoing->s_comp_channel, 0);
+    if (!outgoing->scq) {
+        fprintf(stdout, "failed to allocate send completion queue\n");
+        goto err_alloc_pd_cq;
+    }
+
+    /* create recv completion channel */
+    outgoing->r_comp_channel = ibv_create_comp_channel(outgoing->verbs);
+    if (!outgoing->r_comp_channel) {
+        fprintf(stdout, "failed to allocate recv completion channel\n");
+        goto err_alloc_pd_cq;
+    }
+    outgoing->rcq = ibv_create_cq(outgoing->verbs,
+                                  rcqe, NULL, outgoing->r_comp_channel, 0);
+    if (!outgoing->rcq) {
+        fprintf(stdout, "failed to allocate recv completion queue\n");
+        goto err_alloc_pd_cq;
+    }
+
+    /* allocate qp */
+    attr.qp_context = NULL;
+    attr.send_cq = outgoing->scq;
+    attr.recv_cq = outgoing->rcq;
+    attr.srq = NULL;
+    attr.cap.max_send_wr = scqe;
+    attr.cap.max_recv_wr = rcqe;
+    attr.cap.max_send_sge = 1;
+    attr.cap.max_recv_sge = 1;
+    attr.cap.max_inline_data = 0;
+    attr.qp_type = IBV_QPT_RC;
+    attr.sq_sig_all = 0;
+
+    ret = rdma_create_qp(outgoing->cm_id, outgoing->pd, &attr);
+    if (ret) {
+        perror("rdma_create_qp\n");
+        DPRINTF("%s:%d\n", __func__, __LINE__);
+        goto err_alloc_pd_cq;
+    }
+    outgoing->qp = rdma->cm_id->qp;
+    DPRINTF("send_wr requested %d result %d\n", scqe, attr.cap.max_send_wr);
+    DPRINTF("recv_wr requested %d result %d\n", rcqe, attr.cap.max_recv_wr);
+    if (attr.cap.max_send_wr < scqe || attr.cap.max_recv_wr < rcqe) {
+        abort();
+    }
+
+    return 0;
+
+err_alloc_pd_cq:
+    DPRINTF("%s:%d\n", __func__, __LINE__);
+    if (outgoing->rcq) {
+        ibv_destroy_cq(outgoing->rcq);
+    }
+    if (outgoing->r_comp_channel) {
+        ibv_destroy_comp_channel(outgoing->r_comp_channel);
+    }
+    if (outgoing->scq) {
+        ibv_destroy_cq(outgoing->scq);
+    }
+    if (outgoing->s_comp_channel) {
+        ibv_destroy_comp_channel(outgoing->s_comp_channel);
+    }
+    if (outgoing->pd) {
+        ibv_dealloc_pd(outgoing->pd);
+    }
+
+    outgoing->pd = NULL;
+    outgoing->s_comp_channel = NULL;
+    outgoing->scq = NULL;
+    outgoing->r_comp_channel = NULL;
+    outgoing->rcq = NULL;
+    outgoing->qp = NULL;
+    return -1;
+
+}
+
+static int postcopy_rdma_outgoing_init(RDMAPostcopyOutgoing *outgoing)
+{
+    int ret;
+    RDMAContext *rdma = outgoing->rdma;
+    RDMALocalBlocks *local_ram_blocks = &rdma->local_ram_blocks;
+    int index;
+    RAMBlock *ram_block;
+
+    rdma->pin_all = migrate_rdma_pin_all();
+    rdma->postcopy = migrate_postcopy_outgoing();
+
+    DPRINTF("%s:%d\n", __func__, __LINE__);
+    ret = qemu_rdma_resolve_host(rdma, NULL);
+    if (ret) {
+        DPRINTF("%s:%d\n", __func__, __LINE__);
+        goto error;
+    }
+
+    outgoing->cm_id = rdma->cm_id;
+    outgoing->verbs = rdma->verbs;
+    ret = postcopy_rdma_outgoing_alloc_pd_cq_qp(outgoing);
+    if (ret) {
+        DPRINTF("%s:%d\n", __func__, __LINE__);
+        goto error;
+    }
+    ret = qemu_rdma_init_ram_blocks(rdma);
+    if (ret) {
+        DPRINTF("%s:%d\n", __func__, __LINE__);
+        goto error;
+    }
+    for (index = 0; index < local_ram_blocks->nb_blocks; index++) {
+        RDMALocalBlock *local_block = &local_ram_blocks->block[index];
+        local_block->nb_rdma = g_malloc0(sizeof(local_block->nb_rdma[0]) *
+                                         local_block->nb_chunks);
+    }
+
+    index = 0;
+    QTAILQ_FOREACH(ram_block, &ram_list.blocks, next) {
+        rdma->local_ram_blocks.block[index].ram_block = ram_block;
+        index++;
+    }
+    return 0;
+
+error:
+    postcopy_rdma_outgoing_cleanup(outgoing);
+    return ret;
+}
+
+/* TODO: consolidate qemu_rdma_connect() */
+static int postcopy_rdma_outgoing_connect(RDMAPostcopyOutgoing *outgoing)
+{
+    RDMAContext *rdma = outgoing->rdma;
+    RDMACapabilities cap = { .version = RDMA_CONTROL_VERSION_CURRENT,
+                             .flags = 0,
+                           };
+    struct rdma_conn_param conn_param = { .initiator_depth = 2,
+                                          .retry_count = 5,
+                                          .private_data = &cap,
+                                          .private_data_len = sizeof(cap),
+                                        };
+    struct rdma_cm_event *cm_event;
+    int ret;
+
+    /*
+     * Only negotiate the capability with destination if the user
+     * on the source first requested the capability.
+     */
+    if (rdma->pin_all) {
+        DPRINTF("Server pin-all memory requested.\n");
+        cap.flags |= RDMA_CAPABILITY_PIN_ALL;
+    }
+    if (rdma->postcopy) {
+        DPRINTF("Server postcopy requested.\n");
+        cap.flags |= RDMA_CAPABILITY_POSTCOPY;
+    }
+
+    caps_to_network(&cap);
+
+    ret = rdma_connect(rdma->cm_id, &conn_param);
+    if (ret) {
+        perror("rdma_connect");
+        return -1;
+    }
+
+    ret = rdma_get_cm_event(rdma->channel, &cm_event);
+    if (ret) {
+        perror("rdma_get_cm_event after rdma_connect");
+        rdma_ack_cm_event(cm_event);
+        return -1;
+    }
+
+    if (cm_event->event != RDMA_CM_EVENT_ESTABLISHED) {
+        fprintf(stdout, "event %s %d\n", rdma_event_str(cm_event->event),
+                cm_event->status);
+        perror("rdma_get_cm_event != EVENT_ESTABLISHED after rdma_connect");
+        rdma_ack_cm_event(cm_event);
+        return -1;
+    }
+    rdma->connected = true;
+
+    memcpy(&cap, cm_event->param.conn.private_data, sizeof(cap));
+    network_to_caps(&cap);
+    rdma_ack_cm_event(cm_event);
+
+    /*
+     * Verify that the *requested* capabilities are supported by the destination
+     * and disable them otherwise.
+     */
+    if (rdma->pin_all && !(cap.flags & RDMA_CAPABILITY_PIN_ALL)) {
+        rdma->pin_all = false;
+    }
+    if (rdma->postcopy && !(cap.flags & RDMA_CAPABILITY_POSTCOPY)) {
+        rdma->postcopy = false;
+        return -1;
+    }
+
+    DPRINTF("Pin all memory: %s\n", rdma->pin_all ? "enabled" : "disabled");
+    DPRINTF("Postcopy: %s\n", rdma->postcopy ? "enabled" : "disabled");
+
+    return 0;
+}
+
+static void postcopy_rdma_outgoing_reap_clean_bitmap(
+    RDMAPostcopyOutgoing *outgoing)
+{
+    RDMALocalBlocks *local_ram_blocks = &outgoing->rdma->local_ram_blocks;
+    int i;
+
+    for (i = 0; i < local_ram_blocks->nb_blocks; i++) {
+        RDMALocalBlock *local_block = &local_ram_blocks->block[i];
+        if (local_block->bitmap_key != NULL) {
+            ibv_dereg_mr(local_block->bitmap_key);
+        }
+        g_free(local_block->clean_bitmap);
+        local_block->clean_bitmap = NULL;
+    }
+}
+
+static int postcopy_rdma_outgoing_send_clean_bitmap(
+    RDMAPostcopyOutgoing *outgoing)
+{
+    int ret = 0;
+    const unsigned long *bitmap = migration_bitmap_get();
+    RDMAPostcopyData *data;
+    RDMAControlHeader *head;
+
+    RDMAPostcopyData *sdata;
+    RDMAControlHeader *res_head;
+    RDMARequest *result;
+    uint32_t sdata_index;
+
+    RDMAContext *rdma = outgoing->rdma;
+    RDMALocalBlocks *local_ram_blocks = &rdma->local_ram_blocks;
+    int nb_request;
+
+    ret = postcopy_rdma_buffer_get_wc(outgoing->rbuffer, &data, rdma);
+    if (ret) {
+        DPRINTF("%s:%d\n", __func__, __LINE__);
+        return -EINVAL;
+    }
+    if (data == NULL) {
+        DPRINTF("%s:%d\n", __func__, __LINE__);
+        return -ESHUTDOWN;
+    }
+    head = (RDMAControlHeader*)data->data;
+
+    sdata = postcopy_rdma_buffer_alloc(outgoing->sbuffer);
+    sdata_index = postcopy_rdma_buffer_get_index(outgoing->sbuffer, sdata);
+    outgoing->inflight[sdata_index].rdma_type = RDMA_POSTCOPY_RDMA_BITMAP;
+    assert(outgoing->inflight[sdata_index].nb == 0);
+    assert(outgoing->inflight[sdata_index].bytes == 0);
+
+    res_head = (RDMAControlHeader*)sdata->data;
+    *res_head = *head;
+    res_head->type = RDMA_CONTROL_BITMAP_RESULT;
+    result = (RDMARequest*)(res_head + 1);
+
+    for (nb_request = 0; nb_request < head->repeat; nb_request++) {
+        RDMARequest *request = (RDMARequest *)(head + 1) + nb_request;
+        RDMALocalBlock *local_block;
+        uint64_t length;
+        uint64_t *clean_bitmap;
+        uint64_t start;
+        uint64_t end;
+        uint64_t end_uint64;
+        int i;
+        uint64_t val;
+        unsigned long tmp[sizeof(uint64_t) / sizeof(unsigned long)];
+        struct ibv_sge sge;
+        struct ibv_send_wr wr;
+        struct ibv_send_wr *bad_wr;
+
+        network_to_request(request);
+        local_block = &local_ram_blocks->block[request->block_index];
+        if (local_block->clean_bitmap != NULL) {
+            DPRINTF("%s:%d\n", __func__, __LINE__);
+            ret = -EINVAL;
+            goto error;
+        }
+
+        length = postcopy_bitmap_length(local_block->length);
+        start = local_block->offset >> TARGET_PAGE_BITS;
+        end = (local_block->offset + local_block->length) >> TARGET_PAGE_BITS;
+        end_uint64 = start + ((end - start) & ~63);
+
+        clean_bitmap = g_malloc(length);
+        local_block->clean_bitmap = clean_bitmap;
+        if (start % 64 == 0) {
+            for (i = start; i < end_uint64; i += 64) {
+                val = postcopy_bitmap_to_uint64(&bitmap[BIT_WORD(i)]);
+                val = ~val;
+                clean_bitmap[(i - start) / 64] = cpu_to_be64(val);
+            }
+        } else {
+            for (i = start; i < end_uint64; i += 64) {
+                int j;
+                bitmap_zero(tmp, 64);
+                for (j = 0; j < 63; j++) {
+                    if (!test_bit(i + j, bitmap)) {
+                        set_bit(j, tmp);
+                    }
+                }
+                val = postcopy_bitmap_to_uint64(tmp);
+                clean_bitmap[(i - start) / 64] = cpu_to_be64(val);
+            }
+        }
+        if (end_uint64 < end) {
+            bitmap_zero(tmp, 64);
+            for (i = end_uint64; i < end; i++) {
+                if (!test_bit(i, bitmap)) {
+                    set_bit(i - end_uint64, tmp);
+                }
+            }
+            val = postcopy_bitmap_to_uint64(tmp);
+            clean_bitmap[(end_uint64 - start) / 64] = cpu_to_be64(val);
+        }
+
+        local_block->bitmap_key = ibv_reg_mr(
+            outgoing->pd, clean_bitmap, length, IBV_ACCESS_LOCAL_WRITE);
+        if (local_block->bitmap_key == NULL) {
+            ret = -errno;
+            DPRINTF("%s:%d\n", __func__, __LINE__);
+            goto error;
+        }
+
+        sge.addr = (uint64_t)clean_bitmap;
+        sge.length = length;
+        sge.lkey = local_block->bitmap_key->lkey;
+        wr.wr_id = postcopy_rdma_buffer_get_index(outgoing->sbuffer, sdata);
+        wr.next = NULL;
+        wr.sg_list = &sge;
+        wr.num_sge = 1;
+        wr.opcode = IBV_WR_RDMA_WRITE;
+        wr.send_flags = 0;
+        wr.wr.rdma.remote_addr = request->host_addr;
+        wr.wr.rdma.rkey = request->rkey;
+        ret = ibv_post_send(outgoing->qp, &wr, &bad_wr);
+        if (ret) {
+            DPRINTF("%s:%d\n", __func__, __LINE__);
+            ret = -ret;
+            goto error;
+        }
+
+        *result = *request;
+        DDDPRINTF("%s:%d index %d 0x%"PRIx64" 0x%"PRIx64" 0x%"PRIx32"\n",
+                  __func__, __LINE__, result->block_index,
+                  result->host_addr, result->length, result->rkey);
+        request_to_network(result);
+        result++;
+    }
+    DDDPRINTF("%s:%d repeat %d\n", __func__, __LINE__, head->repeat);
+    postcopy_rdma_buffer_post_recv_data(outgoing->rbuffer, data);
+    return postcopy_rdma_buffer_post_send(outgoing->sbuffer, sdata);
+
+error:
+    postcopy_rdma_buffer_post_recv_data(outgoing->rbuffer, data);
+    postcopy_rdma_outgoing_reap_clean_bitmap(outgoing);
+    postcopy_rdma_buffer_free(outgoing->sbuffer, data);
+    return ret;
+}
+
+int postcopy_rdma_outgoing(MigrationState *ms, MigrationRateLimitStat *rlstat)
+{
+    int ret;
+    int i;
+    RDMAContext *rdma;
+    RDMAPostcopyOutgoing *outgoing;
+    RDMAPostcopyData *data;
+    RDMAControlHeader *head;
+    uint32_t scqe =
+        /* for RDMA Result */
+        RDMA_POSTCOPY_REQ_MAX
+        /* for Register Request */
+        + RDMA_POSTCOPY_REQ_MAX
+        /* for RDMA Result BG */
+        + RDMA_POSTCOPY_REQ_MAX
+        /* for RDMA Result PRE forward */
+        + RDMA_POSTCOPY_REQ_MAX
+        /* for RDMA Result PRE backward */
+        + RDMA_POSTCOPY_REQ_MAX
+        /* for EOS */
+        + 1;
+    uint32_t rcqe =
+        /* for RDMA Request */
+        RDMA_POSTCOPY_REQ_MAX
+        /* Register Result */
+        + RDMA_POSTCOPY_REQ_MAX
+        /* Ready */
+        + RDMA_POSTCOPY_REQ_MAX
+        /* for EOC */
+        + 1;
+
+    outgoing = g_malloc0(sizeof(*ms->rdma_outgoing));
+    outgoing->bg_save.rdma_index = RDMA_POSTCOPY_OUTGOING_SAVE_INVALID;
+    qemu_fclose_null(ms->file, outgoing, &postcopy_rdma_outgoing_write_ops);
+
+    rdma = qemu_rdma_data_init(current_host_port, NULL);
+    if (rdma == NULL) {
+        g_free(outgoing);
+        return -EINVAL;
+    }
+
+    outgoing->rdma = rdma;
+
+    ret = postcopy_rdma_outgoing_init(outgoing);
+    if (ret) {
+        goto error;
+    }
+
+    outgoing->inflight = g_malloc0(sizeof(outgoing->inflight[0]) * scqe);
+    outgoing->sbuffer = postcopy_rdma_buffer_init(
+        outgoing->pd, outgoing->qp, outgoing->scq, outgoing->s_comp_channel,
+        scqe, false);
+    outgoing->rbuffer = postcopy_rdma_buffer_init(
+        outgoing->pd, outgoing->qp, outgoing->rcq, outgoing->r_comp_channel,
+        rcqe, true);
+    if (outgoing->sbuffer == NULL || outgoing->rbuffer == NULL) {
+        ret = -ENOMEM;
+        goto error;
+    }
+    for (i = 0; i < outgoing->rbuffer->size; i++) {
+        ret = postcopy_rdma_buffer_post_recv(outgoing->rbuffer);
+        if (ret) {
+            goto error;
+        }
+    }
+
+    ret = postcopy_rdma_outgoing_connect(outgoing);
+    if (ret) {
+        goto error;
+    }
+
+    ms->rdma_outgoing = outgoing;
+    outgoing->ms = ms;
+    outgoing->rlstat = rlstat;
+
+    if (outgoing->ms->params.precopy_count > 0) {
+        ret = postcopy_rdma_outgoing_send_clean_bitmap(outgoing);
+        if (ret) {
+            DPRINTF("%s:%d\n", __func__, __LINE__);
+            goto error;
+        }
+    }
+
+    ret = postcopy_rdma_buffer_get_wc(outgoing->rbuffer, &data, rdma);
+    if (ret) {
+        DPRINTF("%s:%d\n", __func__, __LINE__);
+        ret = -EINVAL;
+        goto error;
+    }
+    if (data == NULL) {
+        DPRINTF("%s:%d\n", __func__, __LINE__);
+        ret = -ESHUTDOWN;
+        goto error;
+    }
+    head = (RDMAControlHeader*)data->data;
+    ret = qemu_rdma_ram_blocks_result(rdma, head, NULL);
+    if (ret) {
+        DPRINTF("%s:%d\n", __func__, __LINE__);
+        goto error;
+    }
+    postcopy_rdma_buffer_post_recv_data(outgoing->rbuffer, data);
+
+    DPRINTF("%s:%d postcopy_rdma_outgoing done\n", __func__, __LINE__);
+    return 0;
+
+error:
+    postcopy_rdma_outgoing_cleanup(outgoing);
+    return ret;
+}
+
+static void postcopy_rdma_outgoing_rdma_done(RDMAPostcopyOutgoing *outgoing,
+                                             uint64_t wr_id)
+{
+    const unsigned long *migration_bitmap = migration_bitmap_get();
+    RDMAPostcopyData *data = postcopy_rdma_buffer_get_data(outgoing->sbuffer,
+                                                           wr_id);
+    RDMAControlHeader *head = (RDMAControlHeader *)data->data;
+    int i;
+
+    /* data->data is bswapped when post_send. So bswap it again before
+     * referencing it
+     */
+    network_to_control(head);
+    assert(head->repeat == head->len / sizeof(RDMARequest));
+    for (i = 0; i < head->repeat; i++) {
+        RDMARequest *result = (RDMARequest *)(head + 1) + i;
+        RDMALocalBlock *local_block;
+        uint64_t chunk;
+        int bit_s;
+        int bit_e;
+
+        network_to_request(result);
+        local_block =
+            &outgoing->rdma->local_ram_blocks.block[result->block_index];
+        chunk = ram_chunk_index((uint8_t*)local_block->remote_host_addr,
+                                (uint8_t*)result->host_addr);
+        bit_s = (chunk << RDMA_REG_CHUNK_SHIFT) >> TARGET_PAGE_BITS;
+        bit_e = MIN(bit_s + (RDMA_REG_CHUNK_SIZE >> TARGET_PAGE_BITS),
+                    local_block->length >> TARGET_PAGE_BITS);
+
+        local_block->nb_rdma[chunk]--;
+        if (local_block->nb_rdma[chunk] > 0) {
+            continue;
+        }
+        if (local_block->pmr[chunk] == NULL) {
+            continue;
+        }
+        if (local_block->bit < 0) {
+            local_block->bit = bit_s;
+        }
+        if (test_bit(local_block->bit, migration_bitmap)) {
+            continue;
+        }
+        local_block->bit = find_next_bit(migration_bitmap,
+                                         bit_e, local_block->bit);
+        if (local_block->bit == bit_e) {
+            DDDPRINTF("%s:%d dereg block_index %d chunk %"PRIx64"\n",
+                      __func__, __LINE__, local_block->index, chunk);
+            ibv_dereg_mr(local_block->pmr[chunk]);
+            local_block->pmr[chunk] = NULL;
+            outgoing->rdma->total_registrations--;
+        }
+    }
+}
+
+static void postcopy_rdma_outgoing_reap_rdma_write(
+    RDMAPostcopyOutgoing *outgoing, uint64_t wr_id)
+{
+    uint64_t bytes;
+    DDDPRINTF("%s:%d RDMA wr_id 0x%"PRIx64" nb %u\n",
+              __func__, __LINE__, wr_id, outgoing->inflight[wr_id].nb);
+
+    assert(wr_id != outgoing->bg_save.rdma_index);
+    if (outgoing->inflight[wr_id].rdma_type == RDMA_POSTCOPY_RDMA_BITMAP) {
+        postcopy_rdma_outgoing_reap_clean_bitmap(outgoing);
+        return;
+    }
+
+    if (outgoing->inflight[wr_id].rdma_type != RDMA_POSTCOPY_RDMA_ONDEMAND) {
+        assert(outgoing->inflight[wr_id].nb > 0);
+        assert(outgoing->inflight[wr_id].bytes > 0);
+    }
+    bytes = outgoing->inflight[wr_id].bytes;
+    outgoing->inflight[wr_id].nb = 0;
+    outgoing->inflight[wr_id].bytes = 0;
+    switch (outgoing->inflight[wr_id].rdma_type) {
+    case RDMA_POSTCOPY_RDMA_ONDEMAND:
+        if (bytes == 0) {
+            /* in case of ONDEMAND, result is sent back for window control
+             * event when no RDMA WRITE is done.
+             */
+            break;
+        }
+        assert(outgoing->nb_rdma_total > 0);
+        assert(outgoing->bytes_rdma_total >= bytes);
+        outgoing->bytes_rdma_total -= bytes;
+        outgoing->nb_rdma_total--;
+        postcopy_rdma_outgoing_rdma_done(outgoing, wr_id);
+        break;
+    case RDMA_POSTCOPY_RDMA_BACKGROUND:
+        assert(outgoing->nb_bg_total > 0);
+        assert(outgoing->bytes_bg_total >= bytes);
+        outgoing->bytes_bg_total -= bytes;
+        outgoing->nb_bg_total--;
+        postcopy_rdma_outgoing_rdma_done(outgoing, wr_id);
+        break;
+    case RDMA_POSTCOPY_RDMA_PREFAULT:
+        assert(outgoing->nb_pre_total > 0);
+        assert(outgoing->bytes_pre_total >= bytes);
+        outgoing->bytes_pre_total -= bytes;
+        outgoing->nb_pre_total--;
+        postcopy_rdma_outgoing_rdma_done(outgoing, wr_id);
+        break;
+    case RDMA_POSTCOPY_RDMA_BITMAP:
+    default:
+        abort();
+        break;
+    }
+}
+
+static int postcopy_rdma_outgoing_reap_sbuffer(RDMAPostcopyOutgoing *outgoing)
+{
+    uint64_t wr_id;
+    enum ibv_wc_opcode opcode;
+    RDMAPostcopyData *data;
+    int ret = 0;
+
+    while (true) {
+        ret = postcopy_rdma_buffer_poll(outgoing->sbuffer,
+                                        &wr_id, &opcode, &data);
+        if (ret < 0) {
+            break;
+        }
+        if (ret == 0) {
+            break;
+        }
+        assert(ret == 1);
+
+        ret = 0;
+        assert(wr_id < RDMA_POSTCOPY_REQ_MAX * 5 + 1);
+        switch (opcode) {
+        case IBV_WC_SEND:
+            DDPRINTF("%s:%d SEND wr_id %"PRIx64"\n",
+                     __func__, __LINE__, wr_id);
+            postcopy_rdma_outgoing_reap_rdma_write(outgoing, wr_id);
+            assert(outgoing->inflight[wr_id].nb == 0);
+            assert(outgoing->inflight[wr_id].bytes == 0);
+            postcopy_rdma_buffer_free(outgoing->sbuffer, data);
+            break;
+        case IBV_WC_RDMA_WRITE: /* RDMA WRITE is used without signaled flag */
+        default:
+            DPRINTF("unexpected opcode %d wr_id %"PRIu64"\n", opcode, wr_id);
+            abort();
+            break;
+        }
+        if (ret) {
+            break;
+        }
+    }
+    return ret;
+}
+
+static int
+postcopy_rdma_outgoing_alloc_sdata(RDMAPostcopyOutgoing *outgoing,
+                                   RDMAPostcopyData **sdata)
+{
+    if (postcopy_rdma_buffer_empty(outgoing->sbuffer)) {
+        int ret = postcopy_rdma_outgoing_reap_sbuffer(outgoing);
+        if (ret) {
+            return ret;
+        }
+    }
+    *sdata = postcopy_rdma_buffer_alloc(outgoing->sbuffer);
+    return 0;
+}
+
+static int postcopy_rdma_outgoing_save_alloc(RDMAPostcopyOutgoing* outgoing,
+                                             RDMAPostcopySavePage *save,
+                                             RDMA_POSTCOPY_RDMA_TYPE rdma_type)
+{
+    int ret;
+    RDMAPostcopyData *sdata;
+    RDMAControlHeader *res_head;
+    uint32_t result_type;
+    switch (rdma_type) {
+    case RDMA_POSTCOPY_RDMA_ONDEMAND:
+        result_type = RDMA_CONTROL_RDMA_RESULT;
+        break;
+    case RDMA_POSTCOPY_RDMA_BACKGROUND:
+        result_type = RDMA_CONTROL_RDMA_RESULT_BG;
+        break;
+    case RDMA_POSTCOPY_RDMA_PREFAULT:
+        result_type = RDMA_CONTROL_RDMA_RESULT_PRE;
+        break;
+    default:
+        abort();
+    }
+
+    /* allocate rdma_index */
+    ret = postcopy_rdma_outgoing_alloc_sdata(outgoing, &sdata);
+    if (ret) {
+        return ret;
+    }
+    save->rdma_index = postcopy_rdma_buffer_get_index(outgoing->sbuffer,
+                                                      sdata);
+    outgoing->inflight[save->rdma_index].rdma_type = rdma_type;
+    assert(outgoing->inflight[save->rdma_index].nb == 0);
+    assert(outgoing->inflight[save->rdma_index].bytes == 0);
+
+    res_head = (RDMAControlHeader*)sdata->data;
+    res_head->type = result_type;
+    res_head->repeat = 0;
+    DDDPRINTF("%s:%d index %d\n", __func__, __LINE__, save->rdma_index);
+    return 0;
+}
+
+static void postcopy_rdma_outgoing_save_init(RDMAPostcopySavePage *save)
+{
+    struct ibv_sge *sge = &save->sge;
+    struct ibv_send_wr *wr = &save->wr;
+
+    memset(sge, 0, sizeof(*sge));
+    memset(wr, 0, sizeof(*wr));
+    wr->wr_id = save->rdma_index;
+    wr->sg_list = sge;
+    wr->num_sge = 1;
+    wr->opcode = IBV_WR_RDMA_WRITE;
+    wr->send_flags = 0;
+}
+
+static void postcopy_rdma_outgoing_save_first_page(
+    RDMAPostcopyOutgoing *outgoing, RDMAPostcopySavePage *save,
+    RDMALocalBlock *local_block, uint64_t host_addr, uint32_t lkey,
+    uint64_t remote_host_addr, uint32_t rkey)
+{
+    RDMAPostcopyData *data = postcopy_rdma_buffer_get_data(outgoing->sbuffer,
+                                                           save->rdma_index);
+    RDMAControlHeader *res_head = (RDMAControlHeader *)data->data;
+    RDMARequest *result = (RDMARequest *)(res_head + 1) + res_head->repeat;
+
+    assert(save->sge.length == 0);
+
+    save->local_block = local_block;
+    save->sge.addr = host_addr;
+    save->sge.lkey = lkey;
+    save->wr.wr.rdma.remote_addr = remote_host_addr;
+    save->wr.wr.rdma.rkey = rkey;
+
+    result->block_index = save->local_block->index;
+    result->rkey = rkey;
+    result->host_addr = remote_host_addr;
+}
+
+static bool postcopy_rdma_outgoing_save_mergable(
+    const RDMAPostcopySavePage *save,
+    uint64_t host_addr, uint32_t lkey, uint32_t rkey)
+{
+    assert(save->sge.length > 0);
+    return save->sge.lkey == lkey &&
+        save->wr.wr.rdma.rkey == rkey &&
+        save->sge.addr + save->sge.length == host_addr;
+}
+
+static void postcopy_rdma_outgoing_save_prepend(
+    RDMAPostcopyOutgoing *outgoing, RDMAPostcopySavePage *save,
+    uint32_t length)
+{
+    RDMAPostcopyData *data = postcopy_rdma_buffer_get_data(
+        outgoing->sbuffer, save->rdma_index);
+    RDMAControlHeader *head = (RDMAControlHeader *)data->data;
+    RDMARequest *result = (RDMARequest *)(head + 1) + head->repeat;
+    result->host_addr -= TARGET_PAGE_SIZE;
+    save->wr.wr.rdma.remote_addr -= TARGET_PAGE_SIZE;
+    save->sge.addr -= TARGET_PAGE_SIZE;
+    save->sge.length += TARGET_PAGE_SIZE;
+    outgoing->inflight[save->rdma_index].bytes += TARGET_PAGE_SIZE;
+    acct_update_position(outgoing->ms->file, TARGET_PAGE_SIZE, false);
+}
+
+static void postcopy_rdma_outgoing_save_extend(
+    RDMAPostcopyOutgoing *outgoing, RDMAPostcopySavePage *save,
+    uint32_t length)
+{
+    save->sge.length += length;
+    outgoing->inflight[save->rdma_index].bytes += length;
+    acct_update_position(outgoing->ms->file, length, false);
+}
+
+static int postcopy_rdma_outgoing_save_post(
+    RDMAPostcopyOutgoing *outgoing, RDMAPostcopySavePage *save)
+{
+    RDMALocalBlock *local_block = save->local_block;
+    RDMAPostcopyData *data = postcopy_rdma_buffer_get_data(outgoing->sbuffer,
+                                                           save->rdma_index);
+    RDMAControlHeader *res_head = (RDMAControlHeader *)data->data;
+    RDMARequest *result = (RDMARequest *)(res_head + 1) + res_head->repeat;
+    int chunk = ram_chunk_index(local_block->local_host_addr,
+                                (uint8_t*)save->sge.addr);
+    struct ibv_send_wr *bad_wr;
+    int ret;
+
+    result->length = save->sge.length;
+    request_to_network(result);
+    res_head->repeat++;
+    DDDPRINTF("%s:%d rdma write wr_id %d block_index %d"
+              " 0x%"PRIx64" 0x%"PRIx32" 0x%"PRIx32
+              " 0x%"PRIx64" 0x%"PRIx32"\n",
+              __func__, __LINE__, save->rdma_index, local_block->index,
+              save->sge.addr, save->sge.length, save->sge.lkey,
+              save->wr.wr.rdma.remote_addr, save->wr.wr.rdma.rkey);
+
+    ret = ibv_post_send(outgoing->qp, &save->wr, &bad_wr);
+    if (ret) {
+        return -ret;
+    }
+    local_block->nb_rdma[chunk]++;
+    outgoing->inflight[save->rdma_index].nb++;
+    postcopy_rdma_outgoing_save_init(save);
+    return 0;
+}
+
+static bool postcopy_rdma_outgoing_save_done(
+    RDMAPostcopyOutgoing *outgoing, RDMAPostcopySavePage *save)
+{
+    RDMAPostcopyData *data = postcopy_rdma_buffer_get_data(outgoing->sbuffer,
+                                                           save->rdma_index);
+    RDMAControlHeader *res_head = (RDMAControlHeader *)data->data;
+    res_head->len = sizeof(RDMARequest) * res_head->repeat;
+    DDDPRINTF("%s:%d index %d repeat %d\n",
+              __func__, __LINE__, save->rdma_index, res_head->repeat);
+    assert(outgoing->inflight[save->rdma_index].nb == res_head->repeat);
+    save->rdma_index = RDMA_POSTCOPY_OUTGOING_SAVE_INVALID;
+    return res_head->len > 0;
+}
+
+static int postcopy_rdma_outgoing_request_handle_one(
+    RDMAPostcopyOutgoing *outgoing, RDMAPostcopySavePage *save,
+    RDMARequest *request)
+{
+    RDMAContext *rdma = outgoing->rdma;
+    RDMALocalBlock *local_block;
+    ram_addr_t offset_s;
+    ram_addr_t offset_e;
+    ram_addr_t offset;
+    int chunk_s;
+    int chunk_e;
+    int chunk;
+    int ret;
+
+    if (request->block_index >= rdma->local_ram_blocks.nb_blocks) {
+        return -EINVAL;
+    }
+    local_block = &rdma->local_ram_blocks.block[request->block_index];
+    if (request->host_addr < local_block->remote_host_addr ||
+        request->host_addr + request->length >
+        local_block->remote_host_addr + local_block->length) {
+        return -EINVAL;
+    }
+    if (((request->host_addr - local_block->remote_host_addr) &
+         ~TARGET_PAGE_MASK) != 0 ||
+        (request->length & ~TARGET_PAGE_MASK) != 0) {
+        return -EINVAL;
+    }
+
+    offset_s = request->host_addr - local_block->remote_host_addr;
+    offset_e = offset_s + request->length;
+    if ((offset_s & ~TARGET_PAGE_MASK) != 0 ||
+        (offset_e & ~TARGET_PAGE_MASK) != 0) {
+        return -EINVAL;
+    }
+
+    chunk_s = ram_chunk_index((uint8_t*)local_block->remote_host_addr,
+                              (uint8_t*)request->host_addr);
+    chunk_e = ram_chunk_index((uint8_t*)local_block->remote_host_addr,
+                              (uint8_t*)request->host_addr +
+                              request->length - 1);
+    for (chunk = chunk_s; chunk <= chunk_e; chunk++) {
+        if (local_block->remote_keys[chunk] == 0) {
+            local_block->remote_keys[chunk] = request->rkey;
+        } else if (local_block->remote_keys[chunk] != request->rkey) {
+            DPRINTF("invalid rkey 0x%x != 0x%x"
+                    " block_index %d chunk %x addr %"PRIx64"\n",
+                    local_block->remote_keys[chunk], request->rkey,
+                    request->block_index, chunk, request->host_addr);
+            return -EINVAL;
+        }
+    }
+
+    postcopy_rdma_outgoing_save_init(save);
+    for (offset = offset_s; offset < offset_e; offset += TARGET_PAGE_SIZE) {
+        uint8_t *host_addr;
+        uint32_t lkey;
+
+        if (!migration_bitmap_test_and_reset_dirty(local_block->ram_block->mr,
+                                                   offset)) {
+            continue;
+        }
+
+        host_addr = local_block->local_host_addr + offset;
+        chunk = ram_chunk_index(local_block->local_host_addr, host_addr);
+        ret = qemu_rdma_register_and_get_keys(
+            rdma, local_block, host_addr, &lkey, NULL, chunk);
+        if (save->sge.length > 0 &&
+            !postcopy_rdma_outgoing_save_mergable(
+                save, (uint64_t)host_addr, lkey, request->rkey)){
+            outgoing->bytes_rdma_total += save->sge.length;
+            ret = postcopy_rdma_outgoing_save_post(outgoing, save);
+            if (ret) {
+                return ret;
+            }
+        }
+        if (save->sge.length == 0) {
+            postcopy_rdma_outgoing_save_first_page(outgoing, save,
+                                                   local_block,
+                                                   (uint64_t)host_addr,
+                                                   lkey,
+                                                   request->host_addr,
+                                                   request->rkey);
+        }
+        postcopy_rdma_outgoing_save_extend(outgoing, save,
+                                           TARGET_PAGE_SIZE);
+    }
+    if (save->sge.length > 0) {
+        outgoing->bytes_rdma_total += save->sge.length;
+        ret = postcopy_rdma_outgoing_save_post(outgoing, save);
+        if (ret) {
+            return ret;
+        }
+    }
+    return 0;
+}
+
+static int postcopy_rdma_outgoing_prefault_forward(
+    RDMAPostcopyOutgoing *outgoing,
+    RDMALocalBlock *local_block, ram_addr_t offset)
+{
+    int ret;
+    RDMAPostcopySavePage save;
+    ram_addr_t offset_e;
+    RDMAPostcopyData *data;
+
+    if (outgoing->ms->params.prefault_forward <= 0) {
+        return 0;
+    }
+
+    ret = postcopy_rdma_outgoing_save_alloc(outgoing, &save,
+                                            RDMA_POSTCOPY_RDMA_PREFAULT);
+    if (ret) {
+        return ret;
+    }
+
+    offset_e = offset +
+        (outgoing->ms->params.prefault_forward << TARGET_PAGE_BITS);
+    offset_e = MIN(offset_e, local_block->length);
+
+    postcopy_rdma_outgoing_save_init(&save);
+    for (; offset < offset_e; offset += TARGET_PAGE_SIZE) {
+        uint8_t *host_addr = local_block->local_host_addr + offset;
+        int chunk = ram_chunk_index(local_block->local_host_addr, host_addr);
+        uint32_t lkey;
+        uint32_t rkey = local_block->remote_keys[chunk];
+
+        if (rkey == 0) {
+            break;
+        }
+        if (!migration_bitmap_test_and_reset_dirty(local_block->ram_block->mr,
+                                                   offset)) {
+            continue;
+        }
+        ret = qemu_rdma_register_and_get_keys(
+            outgoing->rdma, local_block, host_addr, &lkey, NULL, chunk);
+        if (save.sge.length > 0 &&
+            !postcopy_rdma_outgoing_save_mergable(
+                &save, (uint64_t)host_addr, lkey, rkey)){
+            RDMAPostcopyData *data;
+            RDMAControlHeader *head;
+            outgoing->bytes_pre_total += save.sge.length;
+            ret = postcopy_rdma_outgoing_save_post(outgoing, &save);
+            if (ret) {
+                return ret;
+            }
+            data = postcopy_rdma_buffer_get_data(outgoing->sbuffer,
+                                                 save.rdma_index);
+            head = (RDMAControlHeader *)data->data;
+            if (head->repeat >= RDMA_POSTCOPY_RDMA_REQUEST_MAX) {
+                break;
+            }
+        }
+        if (save.sge.length == 0) {
+            uint64_t remote_host_addr = local_block->remote_host_addr + offset;
+            postcopy_rdma_outgoing_save_first_page(outgoing, &save,
+                                                   local_block,
+                                                   (uint64_t)host_addr,
+                                                   lkey,
+                                                   remote_host_addr,
+                                                   rkey);
+        }
+        postcopy_rdma_outgoing_save_extend(outgoing, &save,
+                                           TARGET_PAGE_SIZE);
+    }
+    if (save.sge.length > 0) {
+        outgoing->bytes_pre_total += save.sge.length;
+        ret = postcopy_rdma_outgoing_save_post(outgoing, &save);
+        if (ret) {
+            return ret;
+        }
+    }
+
+    data = postcopy_rdma_buffer_get_data(outgoing->sbuffer, save.rdma_index);
+    if (postcopy_rdma_outgoing_save_done(outgoing, &save)) {
+        outgoing->nb_pre_total++;
+        ret = postcopy_rdma_buffer_post_send(outgoing->sbuffer, data);
+        if (ret) {
+            return ret;
+        }
+    } else {
+        DDDPRINTF("%s:%d forward no post index %d\n", __func__, __LINE__,
+                  postcopy_rdma_buffer_get_index(outgoing->sbuffer, data));
+        postcopy_rdma_buffer_free(outgoing->sbuffer, data);
+    }
+    return 0;
+}
+
+static int postcopy_rdma_outgoing_prefault_backward(
+    RDMAPostcopyOutgoing *outgoing,
+    RDMALocalBlock *local_block, ram_addr_t offset)
+{
+    int ret;
+    RDMAPostcopySavePage save;
+    ram_addr_t diff;
+    ram_addr_t offset_s;
+    RDMAPostcopyData *data;
+
+    if (outgoing->ms->params.prefault_backward <= 0) {
+        return 0;
+    }
+    ret = postcopy_rdma_outgoing_save_alloc(outgoing, &save,
+                                            RDMA_POSTCOPY_RDMA_PREFAULT);
+    if (ret) {
+        return ret;
+    }
+
+    diff = outgoing->ms->params.prefault_backward << TARGET_PAGE_BITS;
+    offset_s = offset - MIN(offset, diff);
+    offset -= TARGET_PAGE_SIZE;
+    postcopy_rdma_outgoing_save_init(&save);
+    for (; offset >= offset_s; offset -= TARGET_PAGE_SIZE) {
+        uint8_t *host_addr = local_block->local_host_addr + offset;
+        int chunk = ram_chunk_index(local_block->local_host_addr, host_addr);
+        uint32_t lkey;
+        uint32_t rkey = local_block->remote_keys[chunk];
+
+        if (rkey == 0) {
+            break;
+        }
+        if (!migration_bitmap_test_and_reset_dirty(local_block->ram_block->mr,
+                                                   offset)) {
+            continue;
+        }
+        ret = qemu_rdma_register_and_get_keys(
+            outgoing->rdma, local_block, host_addr, &lkey, NULL, chunk);
+        if (save.sge.length > 0) {
+            if (save.sge.lkey == lkey &&
+                save.wr.wr.rdma.rkey == rkey &&
+                save.sge.addr == (uint64_t)host_addr + TARGET_PAGE_SIZE) {
+                postcopy_rdma_outgoing_save_prepend(outgoing, &save,
+                                                    TARGET_PAGE_SIZE);
+            } else {
+                RDMAPostcopyData *data = postcopy_rdma_buffer_get_data(
+                    outgoing->sbuffer, save.rdma_index);
+                RDMAControlHeader *head = (RDMAControlHeader *)data->data;
+                outgoing->bytes_pre_total += save.sge.length;
+                ret = postcopy_rdma_outgoing_save_post(outgoing, &save);
+                if (ret) {
+                    return ret;
+                }
+                if (head->repeat >= RDMA_POSTCOPY_RDMA_REQUEST_MAX) {
+                    break;
+                }
+            }
+        }
+        if (save.sge.length == 0) {
+            uint64_t remote_host_addr = local_block->remote_host_addr + offset;
+            postcopy_rdma_outgoing_save_first_page(outgoing, &save,
+                                                   local_block,
+                                                   (uint64_t)host_addr,
+                                                   lkey,
+                                                   remote_host_addr,
+                                                   rkey);
+            postcopy_rdma_outgoing_save_extend(outgoing, &save,
+                                               TARGET_PAGE_SIZE);
+        }
+    }
+    if (save.sge.length > 0) {
+        outgoing->bytes_pre_total += save.sge.length;
+        ret = postcopy_rdma_outgoing_save_post(outgoing, &save);
+        if (ret) {
+            return ret;
+        }
+    }
+
+    data = postcopy_rdma_buffer_get_data(outgoing->sbuffer, save.rdma_index);
+    if (postcopy_rdma_outgoing_save_done(outgoing, &save)) {
+        outgoing->nb_pre_total++;
+        ret = postcopy_rdma_buffer_post_send(outgoing->sbuffer, data);
+        if (ret) {
+            return ret;
+        }
+    } else {
+        DDDPRINTF("%s:%d backward no post index %d\n", __func__, __LINE__,
+                  postcopy_rdma_buffer_get_index(outgoing->sbuffer, data));
+        postcopy_rdma_buffer_free(outgoing->sbuffer, data);
+    }
+    return 0;
+}
+
+static int
+postcopy_rdma_outgoing_rdma_request_handle(RDMAPostcopyOutgoing *outgoing,
+                                           RDMAPostcopyData *data)
+{
+    RDMAContext *rdma = outgoing->rdma;
+    RDMAControlHeader *head = (RDMAControlHeader*)data->data;
+    RDMARequest *request = (RDMARequest*)(head + 1);
+    RDMALocalBlock *local_block;
+    RDMAPostcopySavePage save;
+    int rdma_index;
+    ram_addr_t offset_s;
+    ram_addr_t offset_e;
+    RDMAPostcopyData *sdata;
+    int i;
+    int ret;
+
+    DDPRINTF("%s:%d\n", __func__, __LINE__);
+    assert(outgoing->nb_rdma_total < RDMA_POSTCOPY_REQ_MAX);
+
+    ret = postcopy_rdma_outgoing_save_alloc(outgoing, &save,
+                                            RDMA_POSTCOPY_RDMA_ONDEMAND);
+    for (i = 0; i < head->repeat; i++) {
+        network_to_request(request);
+        ret = postcopy_rdma_outgoing_request_handle_one(outgoing, &save,
+                                                        request);
+        if (ret) {
+            return ret;
+        }
+        request++;
+    }
+
+    request = (RDMARequest*)(head + 1) + (head->repeat - 1);
+    local_block = &rdma->local_ram_blocks.block[request->block_index];
+    offset_s = request->host_addr - local_block->remote_host_addr;
+    offset_e = request->host_addr + request->length -
+        local_block->remote_host_addr;
+    postcopy_rdma_buffer_post_recv_data(outgoing->rbuffer, data);
+
+    rdma_index = save.rdma_index;
+    if (postcopy_rdma_outgoing_save_done(outgoing, &save)) {
+        DPRINTF("%s:%d\n", __func__, __LINE__);
+        outgoing->nb_rdma_total++;
+    }
+    /* Even RDMA write wasn't posted, send back the result for flow
+     * control */
+    sdata = postcopy_rdma_buffer_get_data(outgoing->sbuffer, rdma_index);
+    ret = postcopy_rdma_buffer_post_send(outgoing->sbuffer, sdata);
+    if (ret) {
+        DPRINTF("%s:%d\n", __func__, __LINE__);
+        return ret;
+    }
+
+    ret = postcopy_rdma_outgoing_prefault_forward(outgoing,
+                                                  local_block, offset_e);
+    if (ret) {
+        DPRINTF("%s:%d\n", __func__, __LINE__);
+        return ret;
+    }
+    ret = postcopy_rdma_outgoing_prefault_backward(outgoing,
+                                                   local_block, offset_s);
+    if (ret) {
+        DPRINTF("%s:%d\n", __func__, __LINE__);
+        return ret;
+    }
+    if (migrate_postcopy_outgoing_move_background()) {
+        ram_addr_t last_offset = offset_e +
+            (outgoing->ms->params.prefault_forward << TARGET_PAGE_BITS);
+        last_offset = MIN(last_offset, local_block->length - TARGET_PAGE_SIZE);
+        ram_save_set_last_seen_block(local_block->ram_block, last_offset);
+    }
+    return 0;
+}
+
+static int
+postcopy_rdma_outgoing_register_result_handle(RDMAPostcopyOutgoing *outgoing,
+                                              RDMAPostcopyData *data)
+{
+    RDMAContext *rdma = outgoing->rdma;
+    RDMAControlHeader *head = (RDMAControlHeader*)data->data;
+    RDMAAsyncRegister *result = (RDMAAsyncRegister*)(head + 1);
+    int i;
+
+    for (i = 0; i < head->repeat; i++) {
+        RDMALocalBlock *local_block;
+        network_to_aregister(result);
+        if (result->block_index > rdma->local_ram_blocks.nb_blocks) {
+            return -EINVAL;
+        }
+        local_block = &rdma->local_ram_blocks.block[result->block_index];
+        if (result->chunk > local_block->nb_chunks) {
+            return -EINVAL;
+        }
+        if (result->rkey == 0) {
+            DPRINTF("%s:%d rkey 0\n", __func__, __LINE__);
+            return -EINVAL;
+        }
+        if (local_block->remote_keys[result->chunk] != 0 &&
+            local_block->remote_keys[result->chunk] != result->rkey) {
+            DPRINTF("%s:%d %d rkey %d\n", __func__, __LINE__,
+                    local_block->remote_keys[result->chunk], result->rkey);
+            return -EINVAL;
+        }
+        DDDPRINTF("%s:%d block_index %d chunk 0x%"PRIx64" rkey %"PRIx32"\n",
+                  __func__, __LINE__,
+                  result->block_index, result->chunk, result->rkey);
+        local_block->remote_keys[result->chunk] = result->rkey;
+
+        result++;
+    }
+    outgoing->nb_register--;
+    outgoing->nb_inflight--;
+    return 0;
+}
+
+static int postcopy_rdma_outgoing_ready_handle(RDMAPostcopyOutgoing *outgoing,
+                                               RDMAPostcopyData *data)
+{
+    RDMAControlHeader *head = (RDMAControlHeader *)data->data;
+    if (head->repeat == 0) {
+        head->repeat = 1;
+    }
+    outgoing->nb_bg_result -= head->repeat;
+    outgoing->nb_inflight -= head->repeat;
+    return 0;
+}
+
+static int postcopy_rdma_outgoing_eoc_handle(RDMAPostcopyOutgoing *outgoing)
+{
+    int ret;
+    RDMAPostcopyData *sdata;
+    RDMAControlHeader *head;
+
+    ret = postcopy_rdma_outgoing_alloc_sdata(outgoing, &sdata);
+    if (ret) {
+        return ret;
+    }
+    head = (RDMAControlHeader *)sdata->data;
+    head->len = 0;
+    head->type = RDMA_CONTROL_EOS;
+    head->repeat = 0;
+    ret = postcopy_rdma_buffer_post_send(outgoing->sbuffer, sdata);
+    if (ret == 0) {
+        outgoing->ms->postcopy->state = PO_STATE_COMPLETED;
+    }
+    return ret;
+}
+
+static int poscopy_rdma_outgoing_rq_handle(RDMAPostcopyOutgoing *outgoing,
+                                           RDMAPostcopyData *data)
+{
+    int ret;
+    RDMAControlHeader *head = (RDMAControlHeader *)data->data;
+
+    DDDPRINTF("%s:%d rq %s\n", __func__, __LINE__, control_desc[head->type]);
+    switch (head->type) {
+    case RDMA_CONTROL_RDMA_REQUEST:
+        ret = postcopy_rdma_outgoing_rdma_request_handle(outgoing, data);
+        break;
+    case RDMA_CONTROL_REGISTER_ARESULT:
+        ret = postcopy_rdma_outgoing_register_result_handle(outgoing, data);
+        postcopy_rdma_buffer_post_recv_data(outgoing->rbuffer, data);
+        break;
+    case RDMA_CONTROL_READY:
+        ret = postcopy_rdma_outgoing_ready_handle(outgoing, data);
+        postcopy_rdma_buffer_post_recv_data(outgoing->rbuffer, data);
+        break;
+    case RDMA_CONTROL_EOC:
+        ret = postcopy_rdma_outgoing_eoc_handle(outgoing);
+        postcopy_rdma_buffer_post_recv_data(outgoing->rbuffer, data);
+        break;
+    default:
+        abort();
+        break;
+    }
+    return ret;
+}
+
+static int postcopy_rdma_outgoing_ram_all_sent(RDMAPostcopyOutgoing *outgoing)
+{
+    PostcopyOutgoingState *s = outgoing->ms->postcopy;
+    RDMAPostcopyData *data;
+    RDMAControlHeader *head;
+    int ret = postcopy_rdma_outgoing_alloc_sdata(outgoing, &data);
+    if (ret) {
+        return ret;
+    }
+    head = (RDMAControlHeader *)data->data;
+
+    assert(s->state == PO_STATE_ACTIVE);
+    s->state = PO_STATE_ALL_PAGES_SENT;
+    head->type = RDMA_CONTROL_EOS;
+    head->len = 0;
+    head->repeat = 0;
+    postcopy_rdma_buffer_post_send(outgoing->sbuffer, data);
+    DPRINTF("sent RDMA_CONTROL_EOS\n");
+    return 0;
+}
+
+static int postcopy_rdma_outgoing_bg_flush(RDMAPostcopyOutgoing *outgoing)
+{
+    RDMAPostcopySavePage *save = &outgoing->bg_save;
+    int ret;
+
+    assert(save->rdma_index != RDMA_POSTCOPY_OUTGOING_SAVE_INVALID);
+    if (save->sge.length == 0) {
+        return 0;
+    }
+    ret = postcopy_rdma_outgoing_save_post(outgoing, save);
+    if (ret) {
+        return ret;
+    }
+    outgoing->bytes_bg_total += save->sge.length;
+    return 0;
+}
+
+static int postcopy_rdma_outgoing_bg_done(RDMAPostcopyOutgoing *outgoing)
+{
+    int ret;
+    RDMAPostcopySavePage *save = &outgoing->bg_save;
+    int rdma_index = save->rdma_index;
+    RDMAPostcopyData *data;
+    RDMAControlHeader *head;
+
+    if (rdma_index == RDMA_POSTCOPY_OUTGOING_SAVE_INVALID) {
+        return 0;
+    }
+    ret = postcopy_rdma_outgoing_bg_flush(outgoing);
+    if (ret) {
+        return ret;
+    }
+
+    data = postcopy_rdma_buffer_get_data(outgoing->sbuffer, rdma_index);
+    head = (RDMAControlHeader *)data->data;
+    DDDPRINTF("%s:%d bg_index %d repeat %d\n",
+              __func__, __LINE__, rdma_index, head->repeat);
+    if (head->repeat == 0) {
+        return 0;
+    }
+    assert(outgoing->inflight[rdma_index].nb > 0);
+    postcopy_rdma_outgoing_save_done(outgoing, &outgoing->bg_save);
+    return postcopy_rdma_buffer_post_send(outgoing->sbuffer, data);
+}
+
+static size_t postcopy_rdma_outgoing_bg_save_page(
+    QEMUFile *f, void *opaque, ram_addr_t block_offset, ram_addr_t offset,
+    size_t size, int *bytes_sent)
+{
+    RDMAPostcopyOutgoing *outgoing = opaque;
+    RDMAContext *rdma = outgoing->rdma;
+    RDMAPostcopySavePage *save = &outgoing->bg_save;
+    RDMAPostcopyData *data;
+    RDMAControlHeader *head;
+    uint64_t block_index;
+    uint64_t chunk;
+    RDMALocalBlock *local_block;
+    uint8_t *host;
+    uint32_t lkey;
+    uint32_t rkey;
+    int ret;
+
+    if (save->rdma_index == RDMA_POSTCOPY_OUTGOING_SAVE_INVALID) {
+        ret = postcopy_rdma_outgoing_save_alloc(outgoing, save,
+                                                RDMA_POSTCOPY_RDMA_BACKGROUND);
+        if (ret) {
+            goto error;
+        }
+        DDDPRINTF("%s:%d bg_index %d\n", __func__, __LINE__, save->rdma_index);
+
+        outgoing->nb_bg_total++;
+        outgoing->nb_bg_result++;
+        outgoing->nb_inflight++;
+        postcopy_rdma_outgoing_save_init(save);
+    }
+
+    ret = qemu_rdma_search_ram_block(rdma, block_offset, offset, size,
+                                     &block_index, &chunk);
+    if (ret) {
+        goto error;
+    }
+    local_block = &rdma->local_ram_blocks.block[block_index];
+    rkey = local_block->remote_keys[chunk];
+    if (rkey == 0) {
+        RDMAAsyncRegister *areg;
+
+        outgoing->bg_break_loop = true;
+        if (test_and_set_bit(chunk, local_block->transit_bitmap)) {
+            DDDPRINTF("%s:%d block_index %"PRId64" chunk 0x%"PRIx64"\n",
+                      __func__, __LINE__, block_index, chunk);
+            return RAM_SAVE_CONTROL_EAGAIN;
+        }
+
+        ret = postcopy_rdma_outgoing_bg_done(outgoing);
+        if (ret) {
+            goto error;
+        }
+        ret = postcopy_rdma_outgoing_alloc_sdata(outgoing, &data);
+        if (ret) {
+            goto error;
+        }
+        head = (RDMAControlHeader *)data->data;
+        head->type = RDMA_CONTROL_REGISTER_AREQUEST;
+        head->repeat = 1;
+        head->len = sizeof(*areg);
+        areg = (RDMAAsyncRegister*)(head + 1);
+        areg->chunk = chunk;
+        areg->block_index = block_index;
+        areg->rkey = 0;
+        aregister_to_network(areg);
+        ret = postcopy_rdma_buffer_post_send(outgoing->sbuffer, data);
+        if (ret) {
+            goto error;
+        }
+        outgoing->nb_register++;
+        outgoing->nb_inflight++;
+        DDDPRINTF("%s:%d aregister block_index %"PRId64" chunk 0x%"PRIx64
+                  " sindex %d\n", __func__, __LINE__, block_index, chunk,
+                  postcopy_rdma_buffer_get_index(outgoing->sbuffer, data));
+        return RAM_SAVE_CONTROL_EAGAIN;
+    }
+
+    host = local_block->local_host_addr + offset;
+    ret = qemu_rdma_register_and_get_keys(rdma, local_block, host,
+                                          &lkey, NULL, chunk);
+    if (ret) {
+        goto error;
+    }
+    if (save->sge.length > 0) {
+        if (!postcopy_rdma_outgoing_save_mergable(save, (uint64_t)host,
+                                                  lkey, rkey)) {
+            data = postcopy_rdma_buffer_get_data(outgoing->sbuffer,
+                                                 save->rdma_index);
+            head = (RDMAControlHeader *)data->data;
+            if (head->repeat >= RDMA_POSTCOPY_RDMA_REQUEST_MAX) {
+                ret = postcopy_rdma_outgoing_bg_done(outgoing);
+                if (ret) {
+                    goto error;
+                }
+                return RAM_SAVE_CONTROL_EAGAIN;
+            }
+
+            ret = postcopy_rdma_outgoing_bg_flush(outgoing);
+            if (ret) {
+                goto error;
+            }
+        } else {
+            assert(save->sge.addr + save->sge.length == (uint64_t)host);
+            postcopy_rdma_outgoing_save_extend(outgoing, save, size);
+            outgoing->bytes_bg_total += size;
+        }
+    }
+    if (save->sge.length == 0) {
+        postcopy_rdma_outgoing_save_first_page(
+            outgoing, save, local_block, (uint64_t)host, lkey,
+            local_block->remote_host_addr + offset, rkey);
+        postcopy_rdma_outgoing_save_extend(outgoing, save, size);
+        outgoing->bytes_bg_total += size;
+    }
+
+    if (outgoing->inflight[save->rdma_index].bytes > RDMA_MERGE_MAX) {
+        ret = postcopy_rdma_outgoing_bg_done(outgoing);
+        if (ret) {
+            goto error;
+        }
+    }
+
+    DDDPRINTF("%s:%d bg_index %d wr_id %"PRIx64
+              " addr 0x%"PRIx64" length 0x%"PRIx32" lkey 0x%"PRIx32
+              " chunk 0x%"PRIx64" nb_bg %d\n",
+              __func__, __LINE__,
+              save->rdma_index, save->wr.wr_id,
+              save->sge.addr, save->sge.length, save->sge.lkey,
+              chunk, outgoing->inflight[save->rdma_index].nb);
+    *bytes_sent = 1;
+    return RAM_SAVE_CONTROL_DELAYED;
+
+error:
+    DPRINTF("%s:%d error\n", __func__, __LINE__);
+    outgoing->ms->postcopy->state = PO_STATE_ERROR_RECEIVE;
+    return RAM_SAVE_CONTROL_EAGAIN;
+}
+
+static const QEMUFileOps postcopy_rdma_outgoing_write_ops = {
+    .save_page = postcopy_rdma_outgoing_bg_save_page,
+};
+
+static int
+postcopy_rdma_outgoing_ram_save_background(RDMAPostcopyOutgoing *outgoing,
+                                           MigrationRateLimitStat *rlstat)
+{
+    MigrationState *ms = outgoing->ms;
+    PostcopyOutgoingState *s = ms->postcopy;
+    QEMUFile *f = outgoing->ms->file;
+    int i;
+    int64_t t0;
+    int ret = 0;
+
+    assert(s->state == PO_STATE_ACTIVE ||
+           s->state == PO_STATE_EOC_RECEIVED ||
+           s->state == PO_STATE_ERROR_RECEIVE);
+
+    switch (s->state) {
+    case PO_STATE_ACTIVE:
+        /* nothing. processed below */
+        break;
+    case PO_STATE_ERROR_RECEIVE:
+        DPRINTF("PO_STATE_ERROR_RECEIVE\n");
+        return -1;
+    case PO_STATE_EOC_RECEIVED:
+        /* this case doesn't happen because directly sending RDMA_CONTROL_EOS
+         * on receiving RDMA_CONTROL_EOC, and move onto PO_STATE_COMPLETED
+         */
+        abort();
+    default:
+        abort();
+    }
+
+    if (migrate_postcopy_outgoing_no_background()) {
+        DDPRINTF("%s:%d\n", __func__, __LINE__);
+        if (ram_bytes_remaining() == 0) {
+            ret = postcopy_rdma_outgoing_ram_all_sent(outgoing);
+        }
+        return ret;
+    }
+
+    DDDPRINTF("%s:%d\n", __func__, __LINE__);
+    outgoing->bg_break_loop = false;
+    i = 0;
+    t0 = qemu_get_clock_ns(rt_clock);
+    migration_update_rate_limit_stat(ms, rlstat, t0);
+    qemu_mutex_lock_ramlist();
+    while (qemu_file_rate_limit(f) == 0) {
+        fd_set fds;
+        int rfd = outgoing->r_comp_channel->fd;
+        int sfd = outgoing->s_comp_channel->fd;
+        struct timeval timeout = {.tv_sec = 0, .tv_usec = 0};
+
+        if (outgoing->nb_inflight >= RDMA_POSTCOPY_REQ_MAX) {
+            DDDPRINTF("inflight max\n");
+            break;
+        }
+        if (outgoing->bytes_bg_total >= RDMA_POSTCOPY_BG_QUEUED_MAX_BYTES) {
+            DDDPRINTF("queue bg 0x%"PRIx64"\n", outgoing->bytes_bg_total);
+            break;
+        }
+
+        if (!ram_save_block(f, true, true)) { /* no more blocks */
+            DDDPRINTF("outgoing background all sent\n");
+            assert(s->state == PO_STATE_ACTIVE);
+            ret = postcopy_rdma_outgoing_ram_all_sent(outgoing);
+            break;
+        }
+        migration_update_rate_limit_stat(ms, rlstat,
+                                         qemu_get_clock_ms(rt_clock));
+        if (outgoing->bg_break_loop) {
+            DDDPRINTF("%s:%d\n", __func__, __LINE__);
+            break;
+        }
+
+        i++;
+        if ((i % RDMA_POSTCOPY_BG_CHECK) == 0) {
+            FD_ZERO(&fds);
+            FD_SET(rfd, &fds);
+            FD_SET(sfd, &fds);
+            ret = select(MAX(rfd, sfd) + 1, &fds, NULL, NULL, &timeout);
+            if (ret >= 0 && (FD_ISSET(rfd, &fds) || FD_ISSET(sfd, &fds))) {
+                ret = 0;
+                DDDPRINTF("pending request\n");
+                break;
+            }
+        }
+
+        /* stolen from ram_save_iterate(): not to hold ram lock too long
+         * Since this is postcopy phase and VM is already quiescent,
+         * bitmap doesn't need to be synced.
+         */
+#define MAX_WAIT 50
+        if ((i & 63) == 0) {
+            uint64_t t1 = (qemu_get_clock_ns(rt_clock) - t0) / 1000000;
+            if (t1 > MAX_WAIT) {
+                DPRINTF("big wait: %" PRIu64 " milliseconds, %d iterations\n",
+                        t1, i);
+                break;
+            }
+        }
+    }
+    if (ret == 0) {
+        ret = postcopy_rdma_outgoing_bg_done(outgoing);
+    }
+    qemu_mutex_unlock_ramlist();
+
+    DDDPRINTF("%s:%d\n", __func__, __LINE__);
+    return ret;
+}
+
+
+int postcopy_rdma_outgoing_loop(MigrationState *ms,
+                                MigrationRateLimitStat *rlstat)
+{
+    PostcopyOutgoingState *s = ms->postcopy;
+    RDMAPostcopyOutgoing *outgoing = ms->rdma_outgoing;
+    int ret;
+    uint64_t wr_id;
+    enum ibv_wc_opcode opcode;
+    RDMAPostcopyData *data;
+
+    fd_set fds;
+    int nfds;
+    int rfd = outgoing->r_comp_channel->fd;
+    int sfd = outgoing->s_comp_channel->fd;
+    struct timeval *timeoutp = &(struct timeval) {
+        .tv_sec = 0,
+        .tv_usec = 0,
+    };
+    struct ibv_cq *ev_cq;
+    void *ev_ctx;
+    int64_t current_time;
+
+    /* postcopy_rdma_outgoing_eoc_handle() directly replies EOS without
+     * transitioning PO_STATE_EOC_RECEIVED unlike
+     * postcopy_outgoing_handle_req()
+     */
+    assert(s->state != PO_STATE_EOC_RECEIVED);
+
+    ret = ibv_req_notify_cq(outgoing->rbuffer->cq, 0);
+    if (ret) {
+        DPRINTF("%s:%d\n", __func__, __LINE__);
+        return -ret;
+    }
+    ret = ibv_req_notify_cq(outgoing->sbuffer->cq, 0);
+    if (ret) {
+        DPRINTF("%s:%d\n", __func__, __LINE__);
+        return -ret;
+    }
+    while((s->state == PO_STATE_ACTIVE ||
+           s->state == PO_STATE_ALL_PAGES_SENT) &&
+          (outgoing->nb_rdma_total < RDMA_POSTCOPY_REQ_MAX)) {
+        ret = postcopy_rdma_buffer_poll(outgoing->rbuffer,
+                                        &wr_id, &opcode, &data);
+        if (ret < 0) {
+            DPRINTF("%s:%d\n", __func__, __LINE__);
+            return ret;
+        }
+        if (ret == 0) {
+            break;
+        }
+        assert(ret == 1);
+
+        ret = poscopy_rdma_outgoing_rq_handle(outgoing, data);
+        if (ret) {
+            DPRINTF("%s:%d\n", __func__, __LINE__);
+            s->state = PO_STATE_ERROR_RECEIVE;
+            return ret;
+        }
+    }
+
+    if (s->state == PO_STATE_ACTIVE) {
+        ret = postcopy_rdma_outgoing_reap_sbuffer(outgoing);
+        if (ret) {
+            DPRINTF("%s:%d\n", __func__, __LINE__);
+            s->state = PO_STATE_ERROR_RECEIVE;
+            return ret;
+        }
+    }
+
+    if (s->state == PO_STATE_ACTIVE) {
+        ret = postcopy_rdma_outgoing_ram_save_background(outgoing, rlstat);
+        if (ret) {
+            s->state = PO_STATE_ERROR_RECEIVE;
+            return ret;
+        }
+    }
+
+    current_time = qemu_get_clock_ms(rt_clock);
+    migration_update_rate_limit_stat(ms, rlstat, current_time);
+    if (qemu_file_rate_limit(ms->file) || s->state != PO_STATE_ACTIVE) {
+        int64_t sleep_ms = migration_sleep_time_ms(rlstat, current_time);
+        timeoutp->tv_sec = sleep_ms / 1000;
+        timeoutp->tv_usec = (sleep_ms % 1000) * 1000;
+    } else {
+        timeoutp = NULL;
+    }
+
+    FD_ZERO(&fds);
+    FD_SET(rfd, &fds);
+    FD_SET(sfd, &fds);
+    nfds = MAX(rfd, sfd);
+    ret = select(nfds + 1, &fds, NULL, NULL, timeoutp);
+    if (ret == -1) {
+        if (errno == EINTR) {
+            return 0;
+        }
+        DPRINTF("%s:%d\n", __func__, __LINE__);
+        return ret;
+    }
+    if (FD_ISSET(rfd, &fds)) {
+        ret = ibv_get_cq_event(outgoing->rbuffer->channel, &ev_cq, &ev_ctx);
+        if (ret) {
+            DPRINTF("%s:%d\n", __func__, __LINE__);
+            return ret;
+        }
+        ibv_ack_cq_events(ev_cq, 1);
+    }
+    if (FD_ISSET(sfd, &fds)) {
+        ret = ibv_get_cq_event(outgoing->sbuffer->channel, &ev_cq, &ev_ctx);
+        if (ret) {
+            DPRINTF("%s:%d\n", __func__, __LINE__);
+            return ret;
+        }
+        ibv_ack_cq_events(ev_cq, 1);
+    }
+    return 0;
+}
+
+/****************************************************************************
+ * RDMA postcopy incoming part
+ */
+
+struct RDMAPostcopyIncoming
+{
+    RDMAContext *rdma;
+
+    struct rdma_cm_id *cm_id;
+    struct rdma_event_channel *channel;
+    struct ibv_context *verbs;
+
+    struct ibv_pd *pd;
+    struct ibv_cq *scq;
+    struct ibv_comp_channel *s_comp_channel;
+    struct ibv_cq *rcq;
+    struct ibv_comp_channel *r_comp_channel;
+    struct ibv_qp *qp;
+
+    QemuMutex sbuffer_lock;
+    RDMAPostcopyBuffer *sbuffer;
+    RDMAPostcopyBuffer *rbuffer;
+
+    RDMAPostcopyData *ready_reply;
+
+    /* protects nb_rdma_req rdma.local_ram_block.block[i].pmr */
+    QemuMutex mutex;
+    QemuCond cond;
+    unsigned int nb_rdma_req;
+};
+
+static int
+postcopy_rdma_incoming_sbuffer_alloc(RDMAPostcopyIncoming *incoming,
+                                     RDMAPostcopyData **data)
+{
+    int ret = 0;
+
+    qemu_mutex_lock(&incoming->sbuffer_lock);
+    if (postcopy_rdma_buffer_empty(incoming->sbuffer)) {
+        while (true) {
+            uint64_t wr_id;
+            enum ibv_wc_opcode opcode;
+            RDMAPostcopyData *data;
+
+            ret = postcopy_rdma_buffer_poll(incoming->sbuffer,
+                                            &wr_id, &opcode, &data);
+            if (ret < 0) {
+                goto out;
+            }
+            if (ret == 0) {
+                break;
+            }
+            assert(ret == 1);
+
+            /* incoming side uses only IBV_WR_SEND */
+            assert(opcode == IBV_WC_SEND);
+            postcopy_rdma_buffer_free(incoming->sbuffer, data);
+        }
+    }
+
+    *data = postcopy_rdma_buffer_alloc(incoming->sbuffer);
+out:
+    qemu_mutex_unlock(&incoming->sbuffer_lock);
+    return ret;
+}
+
+static void
+postcopy_rdma_incoming_sbuffer_free(RDMAPostcopyIncoming *incoming,
+                                    RDMAPostcopyData *data)
+{
+    qemu_mutex_lock(&incoming->sbuffer_lock);
+    postcopy_rdma_buffer_free(incoming->sbuffer, data);
+    qemu_mutex_unlock(&incoming->sbuffer_lock);
+}
+
+static int rdma_poscopy_incoming_alloc_pd_cq_qp(
+    RDMAPostcopyIncoming *incoming)
+{
+    struct RDMAContext *rdma = incoming->rdma;
+    struct ibv_qp_init_attr attr;
+    int ret;
+    uint32_t scqe =
+        /* for RDMA Request */
+        RDMA_POSTCOPY_REQ_MAX
+        /* for Register Result */
+        + RDMA_POSTCOPY_REQ_MAX
+        /* for Ready */
+        + RDMA_POSTCOPY_REQ_MAX
+        /* for EOC */
+        + 1;
+    uint32_t rcqe =
+        /* for RDMA Result */
+        RDMA_POSTCOPY_REQ_MAX
+        /* Register request */
+        + RDMA_POSTCOPY_REQ_MAX
+        /* RDMA Result BG */
+        + RDMA_POSTCOPY_REQ_MAX
+        /* RDMA Result PRE forward */
+        + RDMA_POSTCOPY_REQ_MAX
+        /* RDMA Result PRE backward */
+        + RDMA_POSTCOPY_REQ_MAX
+        /* RDMA Result PRE inflight */
+        + 2
+        /* +1 for EOS */
+        + 1;
+
+    /* allocate pd */
+    incoming->pd = ibv_alloc_pd(incoming->verbs);
+    if (!incoming->pd) {
+        fprintf(stderr, "failed to allocate protection domain\n");
+        return -1;
+    }
+
+    /* create send completion channel */
+    incoming->s_comp_channel = ibv_create_comp_channel(incoming->verbs);
+    if (!incoming->s_comp_channel) {
+        fprintf(stderr, "failed to allocate send completion channel\n");
+        goto error;
+    }
+    incoming->scq = ibv_create_cq(incoming->verbs,
+                                  scqe, NULL, incoming->s_comp_channel, 0);
+    if (!incoming->scq) {
+        fprintf(stderr, "failed to allocate send completion queue\n");
+        goto error;
+    }
+
+    /* create recv completion channel */
+    incoming->r_comp_channel = ibv_create_comp_channel(incoming->verbs);
+    if (!incoming->r_comp_channel) {
+        fprintf(stderr, "failed to allocate recv completion channel\n");
+        goto error;
+    }
+    incoming->rcq = ibv_create_cq(incoming->verbs,
+                                  rcqe, NULL, incoming->r_comp_channel, 0);
+    if (!incoming->rcq) {
+        fprintf(stderr, "failed to allocate recv completion queue\n");
+        goto error;
+    }
+
+    /* allocate qp */
+    attr.qp_context = NULL;
+    attr.send_cq = incoming->scq;
+    attr.recv_cq = incoming->rcq;
+    attr.srq = NULL;
+    attr.cap.max_send_wr = scqe;
+    attr.cap.max_recv_wr = rcqe;
+    attr.cap.max_send_sge = 1;
+    attr.cap.max_recv_sge = 1;
+    attr.cap.max_inline_data = 0;
+    attr.qp_type = IBV_QPT_RC;
+    attr.sq_sig_all = 0;
+
+    ret = rdma_create_qp(incoming->rdma->cm_id, incoming->pd, &attr);
+    if (ret) {
+        perror("rdma_create_qp\n");
+        goto error;
+    }
+    incoming->qp = rdma->cm_id->qp;
+    DPRINTF("send_wr requested %d result %d\n", scqe, attr.cap.max_send_wr);
+    DPRINTF("recv_wr requested %d result %d\n", rcqe, attr.cap.max_recv_wr);
+    if (attr.cap.max_send_wr < scqe || attr.cap.max_recv_wr < rcqe) {
+        abort();
+    }
+    return 0;
+
+error:
+    if (incoming->rcq) {
+        ibv_destroy_cq(incoming->rcq);
+    }
+    if (incoming->r_comp_channel) {
+        ibv_destroy_comp_channel(incoming->r_comp_channel);
+    }
+    if (incoming->scq) {
+        ibv_destroy_cq(incoming->scq);
+    }
+    if (incoming->s_comp_channel) {
+        ibv_destroy_comp_channel(incoming->s_comp_channel);
+    }
+    if (incoming->pd) {
+        ibv_dealloc_pd(incoming->pd);
+    }
+
+    incoming->pd = NULL;
+    incoming->s_comp_channel = NULL;
+    incoming->scq = NULL;
+    incoming->r_comp_channel = NULL;
+    incoming->rcq = NULL;
+    incoming->qp = NULL;
+    return -1;
+}
+
+static void postcopy_rdma_incoming_prepare_ram_block(
+    RDMAContext *rdma, UMemBlockHead *umem_blocks)
+{
+    UMemBlock *umem_block;
+    QLIST_FOREACH(umem_block, umem_blocks, next) {
+        /* mitigate vma pressure
+         * ib verb issues madvise(DONTFORK or DOFORK) on each memory region
+         * when ibv_reg_mr() or ibv_dereg_mr()
+         */
+        RDMALocalBlock *local_block;
+        UMem *umem = umem_block->umem;
+        qemu_madvise(umem->shmem, umem->size, QEMU_MADV_DONTFORK);
+
+        local_block = &rdma->local_ram_blocks.block[umem_block->block_index];
+        local_block->umem_block = umem_block;
+        /* hack: to get page contents to uvmem device */
+        local_block->local_host_addr = umem->shmem;
+
+        DDDPRINTF("UMEM shmem: %d, addr: 0x%" PRIx64 ", offset: 0x%" PRIx64
+                  " length: 0x%" PRIx64 " end: 0x%" PRIx64 " chunks %d\n",
+                  local_block->index,
+                  (uint64_t) local_block->local_host_addr,
+                  local_block->offset,
+                  local_block->length,
+                  (uint64_t) (local_block->local_host_addr +
+                              local_block->length),
+                  local_block->nb_chunks);
+    }
+}
+
+/* mostly copied from qemu_rdma_accept()
+ * TODO: consolidate
+ */
+static int postcopy_rdma_incoming_rdma_accept(RDMAPostcopyIncoming *incoming,
+                                              UMemBlockHead *umem_blocks)
+{
+    int i;
+    RDMAContext *rdma = incoming->rdma;
+    struct rdma_cm_event *cm_event;
+    RDMACapabilities cap;
+    struct rdma_conn_param conn_param = {
+        .responder_resources = 2,
+        .private_data = &cap,
+        .private_data_len = sizeof(cap),
+        .srq = 0,
+    };
+    struct ibv_context *verbs;
+    int ret = -EINVAL;
+
+    DPRINTF("%s:%d\n", __func__, __LINE__);
+    ret = rdma_get_cm_event(incoming->channel, &cm_event);
+    if (ret) {
+        perror("rdma_get_cm_event\n");
+        fprintf(stderr, "ret %d event %s %d\n",
+                ret, rdma_event_str(cm_event->event), cm_event->status);
+        rdma_ack_cm_event(cm_event);
+        goto err_rdma_dest_wait;
+    }
+    if (cm_event->event != RDMA_CM_EVENT_CONNECT_REQUEST) {
+        DPRINTF("%s:%d\n", __func__, __LINE__);
+        rdma_ack_cm_event(cm_event);
+        goto err_rdma_dest_wait;
+    }
+
+    memcpy(&cap, cm_event->param.conn.private_data, sizeof(cap));
+    network_to_caps(&cap);
+    if (cap.version < 1 || cap.version > RDMA_POSTCOPY_VERSION_CURRENT) {
+        fprintf(stderr,
+                "Unknown source RDMA postcopy version: %d, bailing...\n",
+                cap.version);
+        rdma_ack_cm_event(cm_event);
+        goto err_rdma_dest_wait;
+    }
+
+    /*
+     * Respond with only the capabilities this version of QEMU knows about.
+     */
+    cap.flags &= known_capabilities;
+
+    /*
+     * Enable the ones that we do know about.
+     * Add other checks here as new ones are introduced.
+     */
+    if (cap.flags & RDMA_CAPABILITY_PIN_ALL) {
+        rdma->pin_all = true;
+    }
+    if (cap.flags & RDMA_CAPABILITY_POSTCOPY) {
+        rdma->postcopy = true;
+    }
+    if (rdma->pin_all && rdma->postcopy) {
+        fprintf(stderr, "rdma postcopy doesn't support pin-all.\n");
+        goto err_rdma_dest_wait;
+    }
+
+    verbs = cm_event->id->verbs;
+    rdma->cm_id = cm_event->id;
+    incoming->cm_id = cm_event->id;
+
+    rdma_ack_cm_event(cm_event);
+
+    DPRINTF("Memory pin all: %s\n", rdma->pin_all ? "enabled" : "disabled");
+    DPRINTF("Postcopy: %s\n", rdma->postcopy ? "enabled" : "disabled");
+
+    caps_to_network(&cap);
+
+    DPRINTF("verbs context after listen: %p\n", verbs);
+
+    if (!rdma->verbs) {
+        rdma->verbs = incoming->cm_id->verbs;
+    } else if (rdma->verbs != verbs) {
+        fprintf(stderr, "ibv context not matching %p, %p!\n",
+                rdma->verbs, verbs);
+        goto err_rdma_dest_wait;
+    }
+    incoming->verbs = verbs;
+
+    qemu_rdma_dump_id("dest_init", verbs);
+
+    ret = rdma_poscopy_incoming_alloc_pd_cq_qp(incoming);
+    if (ret) {
+        fprintf(stderr, "rdma migration: error allocating pd, cq and qp!\n");
+        goto err_rdma_dest_wait;
+    }
+
+    ret = qemu_rdma_init_ram_blocks(rdma);
+    if (ret) {
+        fprintf(stderr, "rdma migration: error initializing ram blocks!\n");
+        goto err_rdma_dest_wait;
+    }
+    postcopy_rdma_incoming_prepare_ram_block(rdma, umem_blocks);
+
+    DPRINTF("%s:%d rdma_listen success\n", __func__, __LINE__);
+    qemu_mutex_init(&incoming->sbuffer_lock);
+    incoming->sbuffer = postcopy_rdma_buffer_init(
+        incoming->pd, incoming->qp, incoming->scq, incoming->s_comp_channel,
+        RDMA_POSTCOPY_REQ_MAX * 3 + 1, false);
+    incoming->rbuffer = postcopy_rdma_buffer_init(
+        incoming->pd, incoming->qp, incoming->rcq, incoming->r_comp_channel,
+        RDMA_POSTCOPY_REQ_MAX * 5 + 3, true);
+    if (incoming->sbuffer == NULL || incoming->rbuffer == NULL) {
+        DPRINTF("%s:%d postcopy_rdma_buffer_init %p %p\n",
+                __func__, __LINE__, incoming->sbuffer, incoming->rbuffer);
+        goto err_rdma_dest_wait;
+    }
+    DPRINTF("%s:%d REQ_MAX %d\n", __func__, __LINE__, RDMA_POSTCOPY_REQ_MAX);
+    for (i = 0; i < incoming->rbuffer->size; i++) {
+        ret = postcopy_rdma_buffer_post_recv(incoming->rbuffer);
+        if (ret) {
+            DPRINTF("%s:%d %d postcopy_rdma_buffer_post_recv\n",
+                    __func__, __LINE__, i);
+            goto err_rdma_dest_wait;
+        }
+    }
+
+    ret = rdma_accept(incoming->cm_id, &conn_param);
+    if (ret) {
+        perror("rdma_accept\n");
+        fprintf(stderr, "rdma_accept returns %d!\n", ret);
+        goto err_rdma_dest_wait;
+    }
+
+    ret = rdma_get_cm_event(incoming->channel, &cm_event);
+    if (ret) {
+        fprintf(stderr, "rdma_accept get_cm_event failed %d!\n", ret);
+        goto err_rdma_dest_wait;
+    }
+
+    if (cm_event->event != RDMA_CM_EVENT_ESTABLISHED) {
+        fprintf(stderr, "rdma_accept not event established!\n");
+        rdma_ack_cm_event(cm_event);
+        goto err_rdma_dest_wait;
+    }
+    rdma->connected = true;
+
+    rdma_ack_cm_event(cm_event);
+    qemu_rdma_dump_gid("dest_connect", incoming->cm_id);
+    return 0;
+
+err_rdma_dest_wait:
+    DPRINTF("%s:%d\n", __func__, __LINE__);
+    rdma->error_state = ret;
+    qemu_rdma_cleanup(rdma);
+    return ret;
+}
+
+static int postcopy_rdma_incoming_bitmap_request(
+    RDMAPostcopyIncoming *incoming, UMemBlockHead *umem_blocks)
+{
+    int ret;
+    RDMAPostcopyData *data = postcopy_rdma_buffer_alloc(incoming->sbuffer);
+    RDMAControlHeader *head = (RDMAControlHeader *)data->data;
+    RDMARequest *request = (RDMARequest *)(head + 1);
+    RDMALocalBlocks *local_ram_blocks = &incoming->rdma->local_ram_blocks;
+    int i;
+
+    head->type = RDMA_CONTROL_BITMAP_REQUEST;
+    head->repeat = local_ram_blocks->nb_blocks;
+    head->len = sizeof(*request) * head->repeat;
+    for (i = 0; i < head->repeat; i++) {
+        RDMALocalBlock *local_block = &local_ram_blocks->block[i];
+        UMemBlock *umem_block = local_block->umem_block;
+        uint64_t length = postcopy_bitmap_length(local_block->length);
+        local_block->bitmap_key =
+            ibv_reg_mr(incoming->pd, umem_block->phys_received, length,
+                       IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE);
+        if (local_block->bitmap_key == NULL) {
+            ret = -errno;
+            goto error;
+        }
+        request->block_index = i;
+        request->rkey = local_block->bitmap_key->rkey;
+        request->host_addr = (uint64_t)umem_block->phys_received;
+        request->length = length;
+        request_to_network(request);
+        request++;
+    }
+
+    ret = postcopy_rdma_buffer_post_send(incoming->sbuffer, data);
+    if (ret) {
+        goto error;
+    }
+    return 0;
+
+error:
+    for (; i >=0; i--) {
+        ibv_dereg_mr(local_ram_blocks->block[i].bitmap_key);
+        local_ram_blocks->block[i].bitmap_key = NULL;
+    }
+    return ret;
+}
+
+int postcopy_rdma_incoming_umemd_read_clean_bitmap(
+    RDMAPostcopyIncoming *incoming, UMemBlockHead *umem_blocks)
+{
+    int ret;
+    RDMALocalBlocks *local_ram_blocks = &incoming->rdma->local_ram_blocks;
+    RDMAPostcopyData *data;
+    RDMAControlHeader *head;
+    int i;
+
+    ret = postcopy_rdma_buffer_get_wc(incoming->rbuffer, &data,
+                                      incoming->rdma);
+    if (ret) {
+        DPRINTF("%s:%d\n", __func__, __LINE__);
+        return ret;
+    }
+    if (data == NULL) {
+        DPRINTF("%s:%d disconnected\n", __func__, __LINE__);
+        return -ESHUTDOWN;
+    }
+
+    head = (RDMAControlHeader *)data->data;
+    if (head->type != RDMA_CONTROL_BITMAP_RESULT) {
+        DPRINTF("%s:%d\n", __func__, __LINE__);
+        return -EINVAL;
+    }
+    DDPRINTF("%s:%d repeat %d\n", __func__, __LINE__, head->repeat);
+    for (i = 0; i < head->repeat; i++) {
+        RDMARequest *result = (RDMARequest *)(head + 1) + i;
+        RDMALocalBlock *local_block;
+        UMemBlock *umem_block;
+        uint64_t length;
+
+        network_to_request(result);
+        DDDPRINTF("%s:%d i %d index %d 0x%"PRIx64" 0x%"PRIx64" 0x%"PRIx32"\n",
+                  __func__, __LINE__, i, result->block_index,
+                  result->host_addr, result->length, result->rkey);
+        if (result->block_index >= local_ram_blocks->nb_blocks) {
+            DPRINTF("%s:%d\n", __func__, __LINE__);
+            return -EINVAL;
+        }
+        local_block = &local_ram_blocks->block[result->block_index];
+        umem_block = local_block->umem_block;
+
+        if (local_block->bitmap_key == NULL) {
+            DPRINTF("%s:%d\n", __func__, __LINE__);
+            return -EINVAL;
+        }
+        ibv_dereg_mr(local_block->bitmap_key);
+        local_block->bitmap_key = NULL;
+
+        length = postcopy_bitmap_length(local_block->length);
+        postcopy_be64_to_bitmap((uint8_t*)umem_block->phys_received, length);
+        postcopy_incoming_umemd_read_clean_bitmap_done(umem_block);
+    }
+    postcopy_rdma_buffer_post_recv_data(incoming->rbuffer, data);
+    DPRINTF("%s:%d\n", __func__, __LINE__);
+    return 0;
+}
+
+RDMAPostcopyIncoming*
+postcopy_rdma_incoming_init(UMemBlockHead *umem_blocks, bool precopy_enabled)
+{
+    int ret;
+    RDMAContext *rdma = NULL;
+    RDMAPostcopyIncoming* incoming = g_malloc0(sizeof(*incoming));
+    RDMAControlHeader blocks;
+    RDMAPostcopyData *data;
+    assert(current_host_port != NULL);
+
+    qemu_mutex_init(&incoming->mutex);
+    qemu_cond_init(&incoming->cond);
+
+    DPRINTF("%s:%d postcopy incoming init\n", __func__, __LINE__);
+    rdma = qemu_rdma_data_init(current_host_port, NULL);
+    if (rdma == NULL) {
+        DPRINTF("%s:%d\n", __func__, __LINE__);
+        goto error;
+    }
+    DPRINTF("%s:%d qemu_rdma_data_init success\n", __func__, __LINE__);
+    incoming->rdma = rdma;
+
+    ret = qemu_rdma_dest_init(rdma, NULL);
+    if (ret) {
+        DPRINTF("%s:%d\n", __func__, __LINE__);
+        goto error;
+    }
+    DPRINTF("%s:%d qemu_rdma_dest_init success channel %p\n",
+            __func__, __LINE__, rdma->channel);
+    incoming->channel = rdma->channel;
+
+    ret = rdma_listen(rdma->listen_id, 5);
+    if (ret) {
+        DPRINTF("%s:%d\n", __func__, __LINE__);
+        goto error;
+    }
+    DPRINTF("%s:%d rdma_listen success\n", __func__, __LINE__);
+
+    ret = postcopy_rdma_incoming_rdma_accept(incoming, umem_blocks);
+    if (ret) {
+        DPRINTF("%s:%d\n", __func__, __LINE__);
+        goto error;
+    }
+    DPRINTF("%s:%d postcopy_rdma_incoming_rdma_accept\n", __func__, __LINE__);
+
+    if (precopy_enabled) {
+        ret = postcopy_rdma_incoming_bitmap_request(incoming, umem_blocks);
+        if (ret) {
+            DPRINTF("%s:%d\n", __func__, __LINE__);
+            goto error;
+        }
+    }
+
+    ret = qemu_rdma_ram_blocks_request(rdma, &blocks);
+    if (ret) {
+        DPRINTF("%s:%d\n", __func__, __LINE__);
+        goto error;
+    }
+    data = postcopy_rdma_buffer_alloc(incoming->sbuffer);
+    ret = postcopy_rdma_buffer_post_send_buf(incoming->sbuffer, data,
+                                             &blocks, (uint8_t*)rdma->block);
+    if (ret) {
+        DPRINTF("%s:%d\n", __func__, __LINE__);
+        goto error;
+    }
+
+    DPRINTF("%s:%d postcopy_rdma_incoming_init done\n", __func__, __LINE__);
+    return incoming;
+
+error:
+    postcopy_rdma_incoming_cleanup(incoming);
+    return NULL;
+}
+
+void postcopy_rdma_incoming_cleanup(RDMAPostcopyIncoming *incoming)
+{
+    RDMAContext *rdma = incoming->rdma;
+    struct rdma_cm_event *cm_event;
+
+    qemu_mutex_destroy(&incoming->mutex);
+    qemu_cond_destroy(&incoming->cond);
+    if (rdma->cm_id && rdma->connected) {
+        int ret = rdma_disconnect(rdma->cm_id);
+        if (!ret) {
+            DDPRINTF("waiting for disconnect\n");
+            ret = rdma_get_cm_event(rdma->channel, &cm_event);
+            if (!ret) {
+                rdma_ack_cm_event(cm_event);
+            }
+        }
+        DDPRINTF("Disconnected.\n");
+        rdma->connected = false;
+    }
+    if (incoming->qp) {
+        rdma_destroy_qp(incoming->rdma->cm_id);
+        incoming->qp = NULL;
+    }
+    if (incoming->scq) {
+        ibv_destroy_cq(incoming->scq);
+        incoming->scq = NULL;
+    }
+    if (incoming->rcq) {
+        ibv_destroy_cq(incoming->rcq);
+        incoming->rcq = NULL;
+    }
+    if (incoming->s_comp_channel) {
+        ibv_destroy_comp_channel(incoming->s_comp_channel);
+        incoming->s_comp_channel = NULL;
+    }
+    if (incoming->r_comp_channel) {
+        ibv_destroy_comp_channel(incoming->r_comp_channel);
+        incoming->r_comp_channel = NULL;
+    }
+    if (incoming->pd) {
+        ibv_dealloc_pd(incoming->pd);
+        incoming->pd = NULL;
+    }
+    if (rdma->listen_id) {
+        rdma_destroy_id(rdma->listen_id);
+        rdma->listen_id = NULL;
+    }
+    if (rdma->cm_id) {
+        rdma_destroy_id(rdma->cm_id);
+        rdma->cm_id = NULL;
+    }
+    if (rdma->channel) {
+        rdma_destroy_event_channel(rdma->channel);
+        rdma->channel = NULL;
+    }
+    if (incoming->rdma) {
+        qemu_rdma_cleanup(incoming->rdma);
+        incoming->rdma = NULL;
+    }
+    if (incoming->sbuffer) {
+        postcopy_rdma_buffer_destroy(incoming->sbuffer);
+    }
+    if (incoming->rbuffer) {
+        postcopy_rdma_buffer_destroy(incoming->rbuffer);
+    }
+    g_free(rdma);
+    g_free(incoming);
+}
+
+/*
+ * return value
+ * 1: This mr is already deregestered. It implies that this page is
+ *    already received.
+ * 0: success
+ * -1: error
+ */
+static int postcopy_rdma_incoming_reg_mr(
+    RDMAPostcopyIncoming *incoming, RDMALocalBlock *local_block,
+    int chunk, uint32_t *rkey)
+{
+    int ret = 0;
+
+    qemu_mutex_lock(&incoming->mutex);
+    if (test_bit(chunk, local_block->unregister_bitmap)) {
+        ret = 1;
+        goto out;
+    }
+    if (local_block->pmr == NULL) {
+        local_block->pmr = g_malloc0(local_block->nb_chunks *
+                                     sizeof(struct ibv_mr*));
+    }
+    if (local_block->pmr[chunk] == NULL) {
+        uint8_t *chunk_start = ram_chunk_start(local_block, chunk);
+        size_t size = MIN(RDMA_REG_CHUNK_SIZE, local_block->length);
+        local_block->pmr[chunk] = ibv_reg_mr(
+            incoming->pd, chunk_start,
+            size, (IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE));
+        if (local_block->pmr[chunk] == NULL) {
+            perror("Failed to register chunk!");
+            DPRINTF("%s:%d total registrations %d"
+                    " block_index %d chunk 0x%x addr 0x%p"
+                    " size 0x%zx\n",
+                    __func__, __LINE__,
+                    incoming->rdma->total_registrations,
+                    local_block->index, chunk, chunk_start, size);
+            ret = -1;
+            goto out;
+        }
+        incoming->rdma->total_registrations++;
+        DDPRINTF("%s:%d block_index %d chunk %x"
+                 " start 0x%p size 0x%zx rkey %"PRIx32" total %d\n",
+                 __func__, __LINE__,
+                 local_block->index, chunk, chunk_start, size,
+                 local_block->pmr[chunk]->rkey,
+                 incoming->rdma->total_registrations);
+    }
+    *rkey = local_block->pmr[chunk]->rkey;
+
+out:
+    qemu_mutex_unlock(&incoming->mutex);
+    return ret;
+}
+
+static void postcopy_rdma_incoming_dereg_mr(
+    RDMAPostcopyIncoming *incoming, RDMALocalBlock *local_block, int chunk)
+{
+    qemu_mutex_lock(&incoming->mutex);
+    assert(local_block->pmr[chunk] != NULL);
+    DDPRINTF("%s:%d block_index %d chunk %x rkey %"PRIx32" total %d\n",
+             __func__, __LINE__,
+             local_block->index, chunk, local_block->pmr[chunk]->rkey,
+             incoming->rdma->total_registrations);
+    assert(!test_bit(chunk, local_block->unregister_bitmap));
+    set_bit(chunk, local_block->unregister_bitmap);
+    ibv_dereg_mr(local_block->pmr[chunk]);
+    local_block->pmr[chunk] = NULL;
+    incoming->rdma->total_registrations--;
+    qemu_mutex_unlock(&incoming->mutex);
+}
+
+static int postcopy_rdma_incoming_send_eoc(RDMAPostcopyIncoming* incoming)
+{
+    RDMAPostcopyData *data;
+    RDMAControlHeader *head;
+    int ret = postcopy_rdma_incoming_sbuffer_alloc(incoming, &data);
+    if (ret) {
+        return ret;
+    }
+    head = (RDMAControlHeader*)data->data;
+    head->len = 0;
+    head->type = RDMA_CONTROL_EOC;
+    head->repeat = 0;
+    return postcopy_rdma_buffer_post_send(incoming->sbuffer, data);
+}
+
+static int
+postcopy_rdma_incoming_send_rdma_request_one(RDMAPostcopyIncoming* incoming,
+                                             const QEMUUMemReq *umem_req,
+                                             const UMemBlock *umem_block)
+{
+    RDMALocalBlock *local_block =
+        &incoming->rdma->local_ram_blocks.block[umem_block->block_index];
+    RDMAPostcopyData *data;
+    RDMAControlHeader *head;
+    RDMARequest *prev;
+    RDMARequest *req;
+    int i;
+    int ret;
+
+    DDPRINTF("%s:%d\n", __func__, __LINE__);
+    assert(umem_req->nr < MAX_PAGE_NR);
+    ret = postcopy_rdma_incoming_sbuffer_alloc(incoming, &data);
+    if (ret) {
+        DPRINTF("%s:%d\n", __func__, __LINE__);
+        return ret;
+    }
+
+    head = (RDMAControlHeader*)data->data;
+    head->len = 0;
+    head->type = RDMA_CONTROL_RDMA_REQUEST;
+    head->repeat = 0;
+    prev = NULL;
+    req = (RDMARequest*)(head + 1);
+    for (i = 0; i < umem_req->nr; i++) {
+        uint8_t *start = umem_block->umem->shmem;
+        uint8_t *host = start + (umem_req->pgoffs[i] << TARGET_PAGE_BITS);
+        uint64_t chunk = ram_chunk_index(start, host);
+        uint32_t rkey;
+
+        DDDPRINTF("%s:%d chunk %"PRIx64"\n", __func__, __LINE__, chunk);
+        ret = postcopy_rdma_incoming_reg_mr(incoming, local_block, chunk,
+                                            &rkey);
+        if (ret < 0) {
+            return ret;
+        }
+        if (ret > 0) {
+            continue;
+        }
+        set_bit(chunk, local_block->transit_bitmap);
+
+        if (prev && prev->host_addr + prev->length == (uint64_t)host &&
+            prev->rkey == rkey) {
+            DDDPRINTF("%s:%d\n", __func__, __LINE__);
+            prev->length += TARGET_PAGE_SIZE;
+        } else {
+            DDDPRINTF("%s:%d\n", __func__, __LINE__);
+            req->block_index = local_block->index;
+            req->rkey = rkey;
+            req->host_addr = (uint64_t)host;
+            req->length = TARGET_PAGE_SIZE;
+
+            head->repeat++;
+            prev = req;
+            req++;
+        }
+    }
+    if (head->repeat == 0) {
+        DDDPRINTF("%s:%d\n", __func__, __LINE__);;
+        postcopy_rdma_incoming_sbuffer_free(incoming, data);
+        return 0;
+    }
+
+    assert(head->repeat <= RDMA_POSTCOPY_RDMA_REQUEST_MAX);
+    req = (RDMARequest*)(head + 1);
+    for (i = 0; i < head->repeat; i++) {
+        DDDPRINTF("%s:%d"
+                  " request block %"PRId32" chunk 0x%"PRIx64" rkey 0x%"PRIx32
+                  " addr 0x%"PRIx64" length 0x%"PRIx64"\n",
+                  __func__, __LINE__,
+                  req[i].block_index,
+                  ram_chunk_index(umem_block->umem->shmem,
+                                  (uint8_t*)req[i].host_addr),
+                  req[i].rkey, req[i].host_addr, req[i].length);
+        request_to_network(&req[i]);
+    }
+
+    head->len = head->repeat * sizeof(*req);
+    assert(head->len < RDMA_POSTCOPY_REQUEST_MAX_BUFFER - sizeof(*head));
+    return postcopy_rdma_buffer_post_send(incoming->sbuffer, data);
+}
+
+static int
+postcopy_rdma_incoming_send_rdma_request(RDMAPostcopyIncoming* incoming,
+                                         const QEMUUMemReq *umem_req,
+                                         const UMemBlock *umem_block)
+{
+    int ret = 0;
+    uint32_t nr = umem_req->nr;
+    QEMUUMemReq tmp = *umem_req;
+
+    while (nr > 0) {
+        qemu_mutex_lock(&incoming->mutex);
+        while (incoming->nb_rdma_req >= RDMA_POSTCOPY_REQ_MAX) {
+            qemu_cond_wait(&incoming->cond, &incoming->mutex);
+        }
+        incoming->nb_rdma_req++;
+        qemu_mutex_unlock(&incoming->mutex);
+
+        DDDPRINTF("%s:%d\n", __func__, __LINE__);
+        tmp.nr = MIN(nr, MAX_PAGE_NR);
+        ret = postcopy_rdma_incoming_send_rdma_request_one(incoming, &tmp,
+                                                           umem_block);
+        if (ret) {
+            DPRINTF("%s:%d\n", __func__, __LINE__);
+            break;
+        }
+
+        nr -= tmp.nr;
+        tmp.pgoffs += tmp.nr;
+    }
+    DDPRINTF("%s:%d ret %d\n", __func__, __LINE__, ret);
+    return ret;
+}
+
+int postcopy_rdma_incoming_send_req(RDMAPostcopyIncoming *incoming,
+                                    const QEMUUMemReq *umem_req,
+                                    const UMemBlock *umem_block)
+{
+    switch (umem_req->cmd) {
+    case QEMU_UMEM_REQ_EOC:
+        return postcopy_rdma_incoming_send_eoc(incoming);
+    case QEMU_UMEM_REQ_PAGE:
+    case QEMU_UMEM_REQ_PAGE_CONT:
+        return postcopy_rdma_incoming_send_rdma_request(incoming,
+                                                        umem_req, umem_block);
+    default:
+        abort();
+        break;
+    }
+    return 0;
+}
+
+static int postcopy_rdma_incoming_page_received(
+    RDMAPostcopyIncoming *incoming, RDMARequest *rdma_result, int nb_result)
+{
+    RDMALocalBlocks *local_ram_blocks = &incoming->rdma->local_ram_blocks;
+    int i;
+
+    for (i = 0; i < nb_result; i++) {
+        UMemBlock *umem_block;
+        UMem *umem;
+        uint64_t host_s;
+        uint64_t host_e;
+        int host_bit_s;
+        int host_bit_e;
+        ram_addr_t offset;
+        uint64_t chunk_s;
+        uint64_t chunk_e;
+        uint64_t chunk;
+        RDMALocalBlock *local_block;
+
+        network_to_request(rdma_result);
+        if (rdma_result->block_index >= local_ram_blocks->nb_blocks) {
+            DPRINTF("%s:%d index %d > %d\n", __func__, __LINE__,
+                    rdma_result->block_index, local_ram_blocks->nb_blocks);
+            return -EINVAL;
+        }
+
+        local_block = &local_ram_blocks->block[rdma_result->block_index];
+        umem_block = local_block->umem_block;
+        umem = umem_block->umem;
+        assert(!umem_shmem_finished(umem));
+        DDDPRINTF("%s:%d result 0x%"PRIx64" 0x%"PRIx64" 0x%"PRIx64
+                  " shmem 0x%"PRIx64" 0x%"PRIx64" 0x%"PRIx64"\n",
+                  __func__, __LINE__,
+                  rdma_result->host_addr, rdma_result->length,
+                  rdma_result->host_addr + rdma_result->length,
+                  (uint64_t)umem->shmem, umem->size,
+                  (uint64_t)umem->shmem + umem->size);
+        if (rdma_result->host_addr < (uint64_t)umem->shmem ||
+            (uint64_t)umem->shmem + umem->size < rdma_result->host_addr) {
+            DPRINTF("%s:%d index %d invalid addr\n", __func__, __LINE__,
+                    rdma_result->block_index);
+            return -EINVAL;
+        }
+        if (rdma_result->length == 0 ||
+            (rdma_result->length % TARGET_PAGE_SIZE) != 0) {
+            DPRINTF("%s:%d result 0x%"PRIx64" 0x%"PRIx64" 0x%"PRIx64
+                    " shmem 0x%"PRIx64" 0x%"PRIx64" 0x%"PRIx64"\n",
+                    __func__, __LINE__,
+                    rdma_result->host_addr, rdma_result->length,
+                    rdma_result->host_addr + rdma_result->length,
+                    (uint64_t)umem->shmem, umem->size,
+                    (uint64_t)umem->shmem + umem->size);
+            return -EINVAL;
+        }
+
+        host_s = rdma_result->host_addr;
+        host_e = rdma_result->host_addr + rdma_result->length;
+        offset = host_s - (uint64_t)umem->shmem;
+        if ((offset % TARGET_PAGE_SIZE) != 0)  {
+            DPRINTF("%s:%d offset 0x%"PRIx64"\n", __func__, __LINE__, offset);
+            DPRINTF("%s:%d result 0x%"PRIx64" 0x%"PRIx64" 0x%"PRIx64
+                    " shmem 0x%"PRIx64" 0x%"PRIx64" 0x%"PRIx64"\n",
+                    __func__, __LINE__,
+                    rdma_result->host_addr, rdma_result->length,
+                    rdma_result->host_addr + rdma_result->length,
+                    (uint64_t)umem->shmem, umem->size,
+                    (uint64_t)umem->shmem + umem->size);
+            return -EINVAL;
+        }
+        for (;
+             offset < host_e - (uint64_t)umem->shmem;
+             offset += TARGET_PAGE_SIZE) {
+            DPRINTF("%s:%d %s 0x%"PRIx64"\n",
+                    __func__, __LINE__, umem_block->idstr, offset);
+            postcopy_incoming_umem_ram_loaded(umem_block, offset);
+        }
+
+        host_bit_s = (host_s - (uint64_t)umem->shmem) >> TARGET_PAGE_BITS;
+        host_bit_e = (host_e - (uint64_t)umem->shmem) >> TARGET_PAGE_BITS;
+        chunk_s = ram_chunk_index(umem->shmem, (uint8_t*)host_s);
+        host_e = ROUND_UP(host_e, RDMA_REG_CHUNK_SIZE);
+        chunk_e = ram_chunk_index(umem->shmem, (uint8_t*)host_e);
+        for (chunk = chunk_s; chunk < chunk_e; chunk++) {
+            int bit_s = (chunk_s << RDMA_REG_CHUNK_SHIFT) >> TARGET_PAGE_BITS;
+            int bit_e = MIN(bit_s +
+                            (RDMA_REG_CHUNK_SIZE >> TARGET_PAGE_BITS),
+                            umem_block->length >> TARGET_PAGE_BITS);
+
+            if (local_block->pmr[chunk] == NULL) {
+                continue;
+            }
+            if (host_bit_s <= bit_s && bit_e <= host_bit_e) {
+                postcopy_rdma_incoming_dereg_mr(incoming, local_block, chunk);
+                continue;
+            }
+            if (local_block->bit < 0) {
+                local_block->bit = bit_s;
+            }
+            if (!test_bit(local_block->bit, umem_block->phys_received)) {
+                continue;
+            }
+            local_block->bit = find_next_zero_bit(umem_block->phys_received,
+                                                  bit_e, local_block->bit);
+            if (local_block->bit == bit_e && local_block->pmr[chunk]) {
+                postcopy_rdma_incoming_dereg_mr(incoming, local_block, chunk);
+            }
+        }
+        rdma_result++;
+    }
+
+    return 0;
+}
+
+static int postcopy_rdma_incoming_rmda_result(RDMAPostcopyIncoming *incoming,
+                                              RDMAPostcopyData *data)
+{
+    RDMAControlHeader *head = (RDMAControlHeader*)data->data;
+    RDMARequest *rdma_result = (RDMARequest *)(head + 1);
+    int ret;
+    bool wakeup;
+
+    DDPRINTF("%s:%d repeat %d data_index %d\n",
+             __func__, __LINE__, head->repeat,
+             postcopy_rdma_buffer_get_index(incoming->rbuffer, data));
+    ret = postcopy_rdma_incoming_page_received(incoming,
+                                               rdma_result, head->repeat);
+    if (ret) {
+        return ret;
+    }
+
+    wakeup = false;
+    postcopy_rdma_buffer_post_recv_data(incoming->rbuffer, data);
+    qemu_mutex_lock(&incoming->mutex);
+    if (incoming->nb_rdma_req >= RDMA_POSTCOPY_REQ_MAX) {
+        wakeup = true;
+    }
+    incoming->nb_rdma_req--;
+    qemu_mutex_unlock(&incoming->mutex);
+    if (wakeup) {
+        qemu_cond_signal(&incoming->cond);
+    }
+    return 0;
+}
+
+static int postcopy_rdma_incoming_rmda_result_bg(
+    RDMAPostcopyIncoming *incoming, RDMAPostcopyData *data)
+{
+    RDMAControlHeader *head = (RDMAControlHeader*)data->data;
+    RDMARequest *rdma_result = (RDMARequest *)(head + 1);
+    RDMAPostcopyData *sdata;
+    RDMAControlHeader *res_head;
+    int ret;
+
+    sdata = incoming->ready_reply;
+    if (sdata == NULL) {
+        ret = postcopy_rdma_incoming_sbuffer_alloc(incoming, &sdata);
+        if (ret) {
+            return ret;
+        }
+        incoming->ready_reply = sdata;
+        res_head = (RDMAControlHeader *)sdata->data;
+        res_head->type = RDMA_CONTROL_READY;
+        res_head->len = 0;
+        res_head->repeat = 0;
+    }
+    res_head = (RDMAControlHeader *)sdata->data;
+    res_head->repeat++;
+
+    ret = postcopy_rdma_incoming_page_received(incoming,
+                                               rdma_result, head->repeat);
+    if (ret) {
+        return ret;
+    }
+    postcopy_rdma_buffer_post_recv_data(incoming->rbuffer, data);
+
+    if (res_head->repeat > RDMA_POSTCOPY_REPLAY_THRESHOLD) {
+        incoming->ready_reply = NULL;
+        return postcopy_rdma_buffer_post_send(incoming->sbuffer, sdata);
+    }
+    return 0;
+}
+
+static int postcopy_rdma_incoming_rmda_result_pre(
+    RDMAPostcopyIncoming *incoming, RDMAPostcopyData *data)
+{
+    RDMAControlHeader *head = (RDMAControlHeader*)data->data;
+    RDMARequest *rdma_result = (RDMARequest *)(head + 1);
+    int ret;
+
+    ret = postcopy_rdma_incoming_page_received(incoming,
+                                               rdma_result, head->repeat);
+    if (ret) {
+        return ret;
+    }
+    postcopy_rdma_buffer_post_recv_data(incoming->rbuffer, data);
+
+    return 0;
+}
+
+static int postcopy_rdma_incoming_register_arequest(
+    RDMAPostcopyIncoming *incoming, RDMAPostcopyData *data)
+{
+    int ret;
+    int i;
+    RDMALocalBlocks *local_ram_blocks = &incoming->rdma->local_ram_blocks;
+    RDMAControlHeader *head = (RDMAControlHeader*)data->data;
+    RDMAAsyncRegister *areg = (RDMAAsyncRegister *)(head + 1);
+    RDMAPostcopyData *sdata;
+    RDMAControlHeader *res_head;
+    RDMAAsyncRegister *res;
+
+    ret = postcopy_rdma_incoming_sbuffer_alloc(incoming, &sdata);
+    if (ret) {
+        return ret;
+    }
+    res_head = (RDMAControlHeader *)sdata->data;
+    res = (RDMAAsyncRegister *)(res_head + 1);
+    res_head->type = RDMA_CONTROL_REGISTER_ARESULT;
+    res_head->repeat = 0;
+
+    DDPRINTF("%s:%d repeat %d data_index %d\n",
+             __func__, __LINE__, head->repeat,
+             postcopy_rdma_buffer_get_index(incoming->rbuffer, data));
+    for (i = 0; i < head->repeat; i++) {
+        RDMALocalBlock *local_block;
+        uint32_t rkey;
+
+        network_to_aregister(areg);
+        DDDPRINTF("%s:%d block_index %d chunk 0x%"PRIx64"\n",
+                  __func__, __LINE__, areg->block_index, areg->chunk);
+        if (areg->block_index >= local_ram_blocks->nb_blocks) {
+            DPRINTF("%s:%d index %d > %d\n", __func__, __LINE__,
+                    areg->block_index, local_ram_blocks->nb_blocks);
+            return -EINVAL;
+        }
+        local_block = &local_ram_blocks->block[areg->block_index];
+        if (areg->chunk >= local_block->nb_chunks) {
+            DPRINTF("%s:%d index %d chunk 0x%"PRIx64" > %d\n",
+                    __func__, __LINE__,
+                    local_block->index, areg->chunk, local_block->nb_chunks);
+            return -EINVAL;
+        }
+        if (test_and_set_bit(areg->chunk, local_block->transit_bitmap)) {
+            areg++;
+            continue;
+        }
+        res->chunk = areg->chunk;
+        res->block_index = areg->block_index;
+        ret = postcopy_rdma_incoming_reg_mr(incoming, local_block,
+                                            res->chunk, &rkey);
+        if (ret) {
+            return ret;
+        }
+        res->rkey = rkey;
+        DDDPRINTF("%s:%d block_index %d chunk 0x%"PRIx64" rkey %"PRIx32"\n",
+                  __func__, __LINE__, res->block_index, res->chunk, res->rkey);
+        aregister_to_network(res);
+
+        areg++;
+        res++;
+        res_head->repeat++;
+    }
+    res_head->len = sizeof(*res) * res_head->repeat;
+    /* Even when res_head->repeat = 0, post the result for window control */
+    return postcopy_rdma_buffer_post_send(incoming->sbuffer, sdata);
+}
+
+int postcopy_rdma_incoming_recv(RDMAPostcopyIncoming *incoming)
+{
+    int ret;
+    RDMAPostcopyData *data;
+    RDMAControlHeader *head;
+
+    if (!incoming->rdma->connected) {
+        return 0;
+    }
+
+    ret = postcopy_rdma_buffer_get_wc(incoming->rbuffer, &data,
+                                      incoming->rdma);
+    if (ret) {
+        return ret;
+    }
+    if (data == NULL) {
+        DPRINTF("%s:%d disconnected\n", __func__, __LINE__);
+        return 0;
+    }
+
+    head = (RDMAControlHeader*)data->data;
+    DDDPRINTF("%s:%d %s\n", __func__, __LINE__, control_desc[head->type]);
+    switch (head->type) {
+    case RDMA_CONTROL_EOS:
+        postcopy_incoming_umem_req_eoc();
+        postcopy_incoming_umem_eos_received();
+        postcopy_rdma_buffer_post_recv_data(incoming->rbuffer, data);
+        break;
+    case RDMA_CONTROL_RDMA_RESULT:
+        ret = postcopy_rdma_incoming_rmda_result(incoming, data);
+        break;
+    case RDMA_CONTROL_RDMA_RESULT_BG:
+        ret = postcopy_rdma_incoming_rmda_result_bg(incoming, data);
+        break;
+    case RDMA_CONTROL_RDMA_RESULT_PRE:
+        ret = postcopy_rdma_incoming_rmda_result_pre(incoming, data);
+        break;
+    case RDMA_CONTROL_REGISTER_AREQUEST:
+        ret = postcopy_rdma_incoming_register_arequest(incoming, data);
+        postcopy_rdma_buffer_post_recv_data(incoming->rbuffer, data);
+        break;
+    default:
+        abort();
+        break;
+    }
+
+    if (ret) {
+        DPRINTF("%s:%d %s ret %d\n",
+                __func__, __LINE__, control_desc[head->type], ret);
+    }
+    return ret;
 }

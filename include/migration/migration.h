@@ -33,6 +33,7 @@ struct MigrationParams {
 
 typedef struct MigrationState MigrationState;
 typedef struct PostcopyOutgoingState PostcopyOutgoingState;
+typedef struct RDMAPostcopyOutgoing RDMAPostcopyOutgoing;
 
 struct MigrationState
 {
@@ -61,6 +62,7 @@ struct MigrationState
     PostcopyOutgoingState *postcopy;
     int precopy_count;
     bool force_postcopy_phase;
+    RDMAPostcopyOutgoing *rdma_outgoing;
 };
 
 struct MigrationRateLimitStat
