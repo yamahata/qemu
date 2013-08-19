@@ -73,6 +73,7 @@ all: $(PROGS) stap
 CONFIG_NO_PCI = $(if $(subst n,,$(CONFIG_PCI)),n,y)
 CONFIG_NO_KVM = $(if $(subst n,,$(CONFIG_KVM)),n,y)
 CONFIG_NO_XEN = $(if $(subst n,,$(CONFIG_XEN)),n,y)
+CONFIG_NO_RDMA = $(if $(subst n,,$(CONFIG_RDMA)),n,y)
 
 #########################################################
 # cpu emulator library
@@ -125,6 +126,7 @@ LIBS+=$(libs_softmmu)
 
 obj-y += migration-postcopy.o umem.o
 obj-$(CONFIG_RDMA) += migration-rdma.o
+obj-$(CONFIG_NO_RDMA) += migration-rdma-stub.o
 
 # xen support
 obj-$(CONFIG_XEN) += xen-all.o xen-mapcache.o
