@@ -1,0 +1,24 @@
+* migration command
+migrate <uri> [<preocpy count> [<forward> [<backword>]]]
+
+enable postcopy capability in order to use postcopy.
+
+* migration capabilities related to postcopy
+enable/disable postcpoy
+   migrate_set_capability postcopy on
+   migrate_set_capability postcopy off
+
+disable/enable background transfer
+   migrate_set_capability postcopy-no-background on
+   migrate_set_capability postcopy-no-background off
+
+enable/disable move background
+   migrate_set_capability postcopy-move-background on
+   migrate_set_capability postcopy-move-background off
+
+x-rdma is supported. But pin-all isn't supported.
+
+* compilation time constants which may affects performance/latency
+RDMA_POSTCOPY_REQ_MAX
+MAX_PAGE_NR
+RDMA_POSTCOPY_BG_QUEUED_MAX_BYTES
