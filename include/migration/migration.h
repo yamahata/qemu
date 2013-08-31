@@ -218,8 +218,10 @@ void ram_control_load_hook(QEMUFile *f, uint64_t flags);
 #define RAM_SAVE_CONTROL_DELAYED  -2000
 #define RAM_SAVE_CONTROL_EAGAIN   -3000 /* This page isn't saved. try later */
 
+#if !defined(CONFIG_USER_ONLY) && defined(NEED_CPU_H)
 size_t ram_control_save_page(QEMUFile *f, ram_addr_t block_offset,
                              ram_addr_t offset, size_t size,
                              int *bytes_sent);
+#endif
 
 #endif
