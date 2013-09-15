@@ -927,15 +927,22 @@ static inline void *host_from_stream_offset(QEMUFile *f,
  */
 void ram_handle_compressed(void *host, uint8_t ch, uint64_t size)
 {
-    if (ch != 0 || !is_zero_page(host)) {
-        memset(host, ch, size);
+    uint64_t pagesize = getpagesize();
+    while (size > 0) {
+        uint64_t length = MIN(pagesize, size);
+
+        if (ch !=0 || buffer_find_nonzero_offset(host, length) != length) {
+            memset(host, ch, length);
 #ifndef _WIN32
-        if (ch == 0 &&
-            (!kvm_enabled() || kvm_has_sync_mmu()) &&
-            getpagesize() <= TARGET_PAGE_SIZE) {
-            qemu_madvise(host, TARGET_PAGE_SIZE, QEMU_MADV_DONTNEED);
-        }
+            if (ch == 0 &&
+                (!kvm_enabled() || kvm_has_sync_mmu()) && pagesize <= length) {
+                qemu_madvise(host, size, QEMU_MADV_DONTNEED);
+            }
 #endif
+        }
+
+        size -= length;
+        host += length;
     }
 }
 
