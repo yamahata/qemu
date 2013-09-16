@@ -373,6 +373,12 @@ ram_addr_t migration_bitmap_find_and_reset_dirty(MemoryRegion *mr,
     return (next - base) << TARGET_PAGE_BITS;
 }
 
+bool migration_bitmap_test_dirty(MemoryRegion *mr, ram_addr_t offset)
+{
+    int nr = (mr->ram_addr + offset) >> TARGET_PAGE_BITS;
+    return test_bit(nr, migration_bitmap);
+}
+
 bool migration_bitmap_test_and_reset_dirty(MemoryRegion *mr, ram_addr_t offset)
 {
     bool ret;
