@@ -18,6 +18,14 @@ enable/disable move background
 
 x-rdma is supported. But pin-all isn't supported.
 
+enable/disable compress for rdma bg transfer
+   migrate_set_capability postcopy-rdma-compress on
+   migrate_set_capability postcopy-rdma-compress off
+
+* enable/disable bg transfer on the fly
+    migrate-postcopy-set-bg on
+    migrate-postcopy-set-bg off
+
 * compilation time constants which may affects performance/latency
 RDMA_POSTCOPY_REQ_MAX
 MAX_PAGE_NR
