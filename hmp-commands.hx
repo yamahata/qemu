@@ -993,6 +993,20 @@ STEXI
 Forcibly move to postcopy phase from precopy phase
 ETEXI
 
+    {
+        .name       = "migrate_postcopy_set_bg",
+        .args_type  = "enable:b",
+        .params     = "on|off",
+        .help       = "enable/disable postcopy bg transfer",
+        .mhandler.cmd = hmp_migrate_postcopy_set_bg,
+    },
+
+STEXI
+@item migrate_postcopy_set_bg
+@findex migrate_postcopy_set_bg
+enable/disable postcopy bg transfer
+ETEXI
+
 
     {
         .name       = "client_migrate_info",

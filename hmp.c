@@ -1031,6 +1031,15 @@ void hmp_migrate_force_postcopy_phase(Monitor *mon, const QDict *qdict)
     hmp_handle_error(mon, &err);
 }
 
+void hmp_migrate_postcopy_set_bg(Monitor *mon, const QDict *qdict)
+{
+    bool enable = qdict_get_bool(qdict, "enable");
+    Error *err = NULL;
+    qmp_migrate_postcopy_set_bg(enable, &err);
+    hmp_handle_error(mon, &err);
+}
+
+
 void hmp_set_password(Monitor *mon, const QDict *qdict)
 {
     const char *protocol  = qdict_get_str(qdict, "protocol");

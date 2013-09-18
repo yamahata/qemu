@@ -287,6 +287,13 @@ void qmp_migrate_force_postcopy_phase(Error **errp)
     ms->force_postcopy_phase = true;
 }
 
+void qmp_migrate_postcopy_set_bg(bool enable, Error **errp)
+{
+    MigrationState *ms = migrate_get_current();
+    ms->enabled_capabilities[MIGRATION_CAPABILITY_POSTCOPY_NO_BACKGROUND] =
+        !enable;
+}
+
 /* Should not call this when RDMA case. It is handled specifically */
 int postcopy_outgoing_create_read_socket(MigrationState *s, int fd)
 {

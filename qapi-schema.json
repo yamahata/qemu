@@ -1953,6 +1953,17 @@
 { 'command': 'migrate-force-postcopy-phase' }
 
 ##
+# @migrate-postcopy-set-bg
+#
+# Forcibly move to postcopy phase from precopy phase
+#
+# Returns: nothing on success
+#
+# Since: 1.6
+##
+{ 'command': 'migrate-postcopy-set-bg', 'data': {'enabled': 'bool'}}
+
+##
 # @ObjectPropertyInfo:
 #
 # @name: the name of the property
