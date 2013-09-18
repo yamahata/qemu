@@ -788,8 +788,9 @@ static int postcopy_outgoing_loop(MigrationState *ms,
     }
     FD_ZERO(&writefds);
     if (s->state == PO_STATE_ACTIVE || s->state == PO_STATE_EOC_RECEIVED) {
+        int64_t current_time = qemu_get_clock_ms(rt_clock);
+        migration_update_rate_limit_stat(ms, rlstat, current_time);
         if (qemu_file_rate_limit(ms->file)) {
-            int64_t current_time = qemu_get_clock_ms(rt_clock);
             int64_t sleep_ms = migration_sleep_time_ms(rlstat, current_time);
             timeoutp->tv_sec = sleep_ms / 1000;
             timeoutp->tv_usec = (sleep_ms % 1000) * 1000;
@@ -809,15 +810,11 @@ static int postcopy_outgoing_loop(MigrationState *ms,
     }
     if (FD_ISSET(readfd, &readfds)) {
         postcopy_outgoing_recv_handler(ms);
-        migration_update_rate_limit_stat(ms, rlstat,
-                                         qemu_get_clock_ms(rt_clock));
         return 0;
     }
     if (FD_ISSET(writefd, &writefds)) {
         return postcopy_outgoing_ram_save_background(ms, rlstat);
     }
-    migration_update_rate_limit_stat(ms, rlstat,
-                                     qemu_get_clock_ms(rt_clock));
     return 0;
 }
 
