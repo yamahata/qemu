@@ -1039,10 +1039,12 @@ static int qemu_rdma_resolve_host(RDMAContext *rdma, Error **errp)
             if (ret) {
                 continue;
             }
+            rdma_freeaddrinfo(res);
             goto route;
         }
     }
     DPRINTF("qemu_rdma_resolve_host rdma_resolve_addr\n");
+    rdma_freeaddrinfo(res);
 
     ERROR(errp, "could not resolve address %s", rdma->host);
     goto err_resolve_get_addr;
@@ -2588,12 +2590,13 @@ static int qemu_rdma_dest_init(RDMAContext *rdma, Error **errp)
                         continue;
                     }
                 }
-                    
+                rdma_freeaddrinfo(res);
                 goto listen;
             }
         }
 
         ERROR(errp, "Error: could not rdma_bind_addr!");
+        rdma_freeaddrinfo(res);
         goto err_dest_init_bind_addr;
     } else {
         ERROR(errp, "migration host and port not specified!");
