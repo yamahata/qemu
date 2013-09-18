@@ -2999,6 +2999,8 @@ static int qemu_rdma_accept(RDMAContext *rdma)
     verbs = cm_event->id->verbs;
 
     rdma_ack_cm_event(cm_event);
+    rdma_destroy_id(rdma->listen_id);
+    rdma->listen_id = NULL;
 
     DPRINTF("Memory pin all: %s\n", rdma->pin_all ? "enabled" : "disabled");
     DPRINTF("Postcopy: %s\n", rdma->postcopy ? "enabled" : "disabled");
