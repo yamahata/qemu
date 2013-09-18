@@ -167,6 +167,7 @@ void migrate_del_blocker(Error *reason);
 bool migrate_postcopy_outgoing(void);
 bool migrate_postcopy_outgoing_no_background(void);
 bool migrate_postcopy_outgoing_move_background(void);
+bool migrate_postcopy_outgoing_rdma_compress(void);
 
 bool migrate_rdma_pin_all(void);
 bool migrate_zero_blocks(void);
