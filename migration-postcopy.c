@@ -512,6 +512,7 @@ static void postcopy_outgoing_recv_handler(MigrationState *ms)
     int readfd = qemu_get_fd(file_read);
     int ret = 0;
 
+    DPRINTF("called\n");
     assert(s->state == PO_STATE_ACTIVE ||
            s->state == PO_STATE_ALL_PAGES_SENT);
 
@@ -554,6 +555,7 @@ static void postcopy_outgoing_recv_handler(MigrationState *ms)
     if (s->state == PO_STATE_COMPLETED) {
         DPRINTF("PO_STATE_COMPLETED\n");
     }
+    DPRINTF("done\n");
 }
 
 static void postcopy_outgoing_send_clean_bitmap(QEMUFile *f)
@@ -682,6 +684,7 @@ static int postcopy_outgoing_ram_save_background(
     int i;
     int64_t t0;
 
+    DPRINTF("called\n");
     assert(s->state == PO_STATE_ACTIVE ||
            s->state == PO_STATE_EOC_RECEIVED ||
            s->state == PO_STATE_ERROR_RECEIVE);
@@ -763,6 +766,7 @@ static int postcopy_outgoing_ram_save_background(
     }
     qemu_mutex_unlock_ramlist();
 
+    DPRINTF("done\n");
     return 0;
 }
 
