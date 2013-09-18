@@ -6349,6 +6349,8 @@ static int postcopy_rdma_incoming_rdma_accept(RDMAPostcopyIncoming *incoming,
     incoming->cm_id = cm_event->id;
 
     rdma_ack_cm_event(cm_event);
+    rdma_destroy_id(rdma->listen_id);
+    rdma->listen_id = NULL;
 
     DPRINTF("Memory pin all: %s\n", rdma->pin_all ? "enabled" : "disabled");
     DPRINTF("Postcopy: %s\n", rdma->postcopy ? "enabled" : "disabled");
@@ -6571,7 +6573,7 @@ postcopy_rdma_incoming_init(UMemBlockHead *umem_blocks, bool precopy_enabled)
             __func__, __LINE__, rdma->channel);
     incoming->channel = rdma->channel;
 
-    ret = rdma_listen(rdma->listen_id, 5);
+    ret = rdma_listen(rdma->listen_id, 1);
     if (ret) {
         DPRINTF("%s:%d\n", __func__, __LINE__);
         goto error;
