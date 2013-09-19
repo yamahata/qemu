@@ -3514,7 +3514,7 @@ const QEMUFileOps rdma_write_ops = {
     .save_page          = qemu_rdma_save_page,
 };
 
-static void *qemu_fopen_rdma(RDMAContext *rdma, const char *mode)
+static QEMUFile *qemu_fopen_rdma(RDMAContext *rdma, const char *mode)
 {
     QEMUFileRDMA *r = g_malloc0(sizeof(QEMUFileRDMA));
 
