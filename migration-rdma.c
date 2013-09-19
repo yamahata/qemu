@@ -5929,7 +5929,10 @@ postcopy_rdma_outgoing_ram_save_background(RDMAPostcopyOutgoing *outgoing,
         if (!ram_save_block(f, true, true)) { /* no more blocks */
             DDDPRINTF("outgoing background all sent\n");
             assert(s->state == PO_STATE_ACTIVE);
-            ret = postcopy_rdma_outgoing_ram_all_sent(outgoing);
+            ret = postcopy_rdma_outgoing_bg_done(outgoing);
+            if (ret == 0) {
+                ret = postcopy_rdma_outgoing_ram_all_sent(outgoing);
+            }
             break;
         }
         migration_update_rate_limit_stat(ms, rlstat,
