@@ -3646,6 +3646,7 @@ err:
 /* too large number may result in error when creating cq/qp */
 /* #define RDMA_POSTCOPY_REQ_MAX           64 */
 #define RDMA_POSTCOPY_REQ_MAX           16
+//#define RDMA_POSTCOPY_REQ_MAX           2       /* exercise window control */
 #define RDMA_POSTCOPY_REPLAY_THRESHOLD (RDMA_POSTCOPY_REQ_MAX / 2)
 #define RDMA_POSTCOPY_BG_CHECK          32
 
@@ -3657,6 +3658,7 @@ err:
 #define RDMA_POSTCOPY_REQUEST_MAX_BUFFER        (128 * 1024)
 /* #define MAX_PAGE_NR     ((RDMA_POSTCOPY_REQUEST_MAX_BUFFER - sizeof(RDMAControlHeader)) / sizeof(RDMARequest)) */       /* too large causing ENOMEM */
 #define MAX_PAGE_NR     4       /* to exercise window control */
+//#define MAX_PAGE_NR     1       /* to exercise window control */
 #define MAX_COMPRESS_NR (((RDMA_POSTCOPY_REQUEST_MAX_BUFFER - sizeof(RDMAControlHeader)) / sizeof(RDMACompress)))
 
 typedef struct QEMU_PACKED
@@ -3674,6 +3676,7 @@ typedef struct QEMU_PACKED
 #define RDMA_POSTCOPY_RDMA_REQUEST_MAX  \
         ((RDMA_POSTCOPY_REQUEST_MAX_BUFFER - sizeof(RDMAControlHeader)) / \
          sizeof(RDMARequest))
+QEMU_BUILD_BUG_ON(RDMA_POSTCOPY_RDMA_REQUEST_MAX < MAX_PAGE_NR);
 
 static void request_to_network(RDMARequest *req)
 {
@@ -4256,6 +4259,8 @@ static int postcopy_rdma_outgoing_alloc_pd_cq_qp(
     uint32_t scqe =
         /* RDMA WRITE for RDMARequest + RDMA result */
         RDMA_POSTCOPY_REQ_MAX * (MAX_PAGE_NR + 1)
+        /* RDMACompress */
+        + RDMA_POSTCOPY_REQ_MAX
         /* Register request */
         + RDMA_POSTCOPY_REQ_MAX * MAX_PAGE_NR
         /* RDMA for BG + RDMA result BG */
@@ -4268,6 +4273,8 @@ static int postcopy_rdma_outgoing_alloc_pd_cq_qp(
         + 1;
     uint32_t rcqe =
         /* for RDMA Request */
+        + RDMA_POSTCOPY_REQ_MAX
+        /* for RDMA Compress result */
         + RDMA_POSTCOPY_REQ_MAX
         /* for Register Result */
         + RDMA_POSTCOPY_REQ_MAX
@@ -4624,7 +4631,7 @@ static int postcopy_rdma_outgoing_send_clean_bitmap(
         wr.wr.rdma.rkey = request->rkey;
         ret = ibv_post_send(outgoing->qp, &wr, &bad_wr);
         if (ret) {
-            DPRINTF("%s:%d\n", __func__, __LINE__);
+            DPRINTF("%s:%d ret %d\n", __func__, __LINE__, ret);
             ret = -ret;
             goto error;
         }
@@ -4660,6 +4667,8 @@ int postcopy_rdma_outgoing(MigrationState *ms, MigrationRateLimitStat *rlstat)
         RDMA_POSTCOPY_REQ_MAX
         /* for Register Request */
         + RDMA_POSTCOPY_REQ_MAX
+        /* for RDMA COMPRESS */
+        + RDMA_POSTCOPY_REQ_MAX
         /* for RDMA Result BG */
         + RDMA_POSTCOPY_REQ_MAX
         /* for RDMA Result PRE forward */
@@ -4671,6 +4680,8 @@ int postcopy_rdma_outgoing(MigrationState *ms, MigrationRateLimitStat *rlstat)
     uint32_t rcqe =
         /* for RDMA Request */
         RDMA_POSTCOPY_REQ_MAX
+        /* for RDMA Compress result */
+        + RDMA_POSTCOPY_REQ_MAX
         /* Register Result */
         + RDMA_POSTCOPY_REQ_MAX
         /* Ready */
@@ -4893,7 +4904,7 @@ static int postcopy_rdma_outgoing_reap_sbuffer(RDMAPostcopyOutgoing *outgoing)
         assert(ret == 1);
 
         ret = 0;
-        assert(wr_id < RDMA_POSTCOPY_REQ_MAX * 5 + 1);
+        assert(wr_id < RDMA_POSTCOPY_REQ_MAX * 6 + 1);
         switch (opcode) {
         case IBV_WC_SEND:
             DDPRINTF("%s:%d SEND wr_id %"PRIx64"\n",
@@ -5070,6 +5081,7 @@ static int postcopy_rdma_outgoing_save_post(
 
     ret = ibv_post_send(outgoing->qp, &save->wr, &bad_wr);
     if (ret) {
+        DPRINTF("%s:%d ret %d\n", __func__, __LINE__, ret);
         return -ret;
     }
     local_block->nb_rdma[chunk]++;
@@ -5241,7 +5253,7 @@ static int postcopy_rdma_outgoing_prefault_forward(
             data = postcopy_rdma_buffer_get_data(outgoing->sbuffer,
                                                  save.rdma_index);
             head = (RDMAControlHeader *)data->data;
-            if (head->repeat >= RDMA_POSTCOPY_RDMA_REQUEST_MAX) {
+            if (head->repeat >= MAX_PAGE_NR) {
                 break;
             }
         }
@@ -5333,7 +5345,7 @@ static int postcopy_rdma_outgoing_prefault_backward(
                 if (ret) {
                     return ret;
                 }
-                if (head->repeat >= RDMA_POSTCOPY_RDMA_REQUEST_MAX) {
+                if (head->repeat >= MAX_PAGE_NR) {
                     break;
                 }
             }
@@ -5546,13 +5558,13 @@ static int poscopy_rdma_outgoing_rq_handle(RDMAPostcopyOutgoing *outgoing,
         postcopy_rdma_buffer_post_recv_data(outgoing->rbuffer, data);
         break;
     case RDMA_CONTROL_EOC:
-        ret = postcopy_rdma_outgoing_eoc_handle(outgoing);
         postcopy_rdma_buffer_post_recv_data(outgoing->rbuffer, data);
+        ret = postcopy_rdma_outgoing_eoc_handle(outgoing);
         break;
     case RDMA_CONTROL_COMPRESS_RESULT:
         postcopy_rdma_outgoing_compress_result_handle(outgoing);
         postcopy_rdma_buffer_post_recv_data(outgoing->rbuffer, data);
-      break;
+        break;
     default:
         abort();
         break;
@@ -5646,6 +5658,7 @@ static size_t postcopy_rdma_outgoing_bg_save_page(
     ret = qemu_rdma_search_ram_block(rdma, block_offset, offset, size,
                                      &block_index, &chunk);
     if (ret) {
+        DPRINTF("%s:%d ret %d\n", __func__, __LINE__, ret);
         goto error;
     }
     local_block = &rdma->local_ram_blocks.block[block_index];
@@ -5656,6 +5669,7 @@ static size_t postcopy_rdma_outgoing_bg_save_page(
 
         ret = postcopy_rdma_outgoing_bg_done(outgoing);
         if (ret) {
+            DPRINTF("%s:%d ret %d\n", __func__, __LINE__, ret);
             goto error;
         }
         outgoing->bg_break_loop = true;
@@ -5666,6 +5680,7 @@ static size_t postcopy_rdma_outgoing_bg_save_page(
         }
         ret = postcopy_rdma_outgoing_alloc_sdata(outgoing, &data);
         if (ret) {
+            DPRINTF("%s:%d ret %d\n", __func__, __LINE__, ret);
             goto error;
         }
         head = (RDMAControlHeader *)data->data;
@@ -5738,6 +5753,7 @@ static size_t postcopy_rdma_outgoing_bg_save_page(
             outgoing->nb_inflight++;
             ret = postcopy_rdma_buffer_post_send(outgoing->sbuffer, data);
             if (ret) {
+                DPRINTF("%s:%d ret %d\n", __func__, __LINE__, ret);
                 goto error;
             }
             *bytes_sent = 1;
@@ -5755,6 +5771,7 @@ static size_t postcopy_rdma_outgoing_bg_save_page(
         aregister_to_network(areg);
         ret = postcopy_rdma_buffer_post_send(outgoing->sbuffer, data);
         if (ret) {
+            DPRINTF("%s:%d ret %d\n", __func__, __LINE__, ret);
             goto error;
         }
         outgoing->nb_register++;
@@ -5769,6 +5786,7 @@ static size_t postcopy_rdma_outgoing_bg_save_page(
         ret = postcopy_rdma_outgoing_save_alloc(outgoing, save,
                                                 RDMA_POSTCOPY_RDMA_BACKGROUND);
         if (ret) {
+            DPRINTF("%s:%d ret %d\n", __func__, __LINE__, ret);
             goto error;
         }
         DDDPRINTF("%s:%d bg_index %d\n", __func__, __LINE__, save->rdma_index);
@@ -5782,6 +5800,7 @@ static size_t postcopy_rdma_outgoing_bg_save_page(
     ret = qemu_rdma_register_and_get_keys(rdma, local_block, host,
                                           &lkey, NULL, chunk);
     if (ret) {
+        DPRINTF("%s:%d ret %d\n", __func__, __LINE__, ret);
         goto error;
     }
     if (save->sge.length > 0) {
@@ -5790,9 +5809,11 @@ static size_t postcopy_rdma_outgoing_bg_save_page(
             data = postcopy_rdma_buffer_get_data(outgoing->sbuffer,
                                                  save->rdma_index);
             head = (RDMAControlHeader *)data->data;
-            if (head->repeat >= RDMA_POSTCOPY_RDMA_REQUEST_MAX) {
+            if (head->repeat >= MAX_PAGE_NR ||
+                save->local_block->index != local_block->index) {
                 ret = postcopy_rdma_outgoing_bg_done(outgoing);
                 if (ret) {
+                    DPRINTF("%s:%d ret %d\n", __func__, __LINE__, ret);
                     goto error;
                 }
                 return RAM_SAVE_CONTROL_EAGAIN;
@@ -5800,6 +5821,7 @@ static size_t postcopy_rdma_outgoing_bg_save_page(
 
             ret = postcopy_rdma_outgoing_bg_flush(outgoing);
             if (ret) {
+                DPRINTF("%s:%d ret %d\n", __func__, __LINE__, ret);
                 goto error;
             }
         } else {
@@ -5819,6 +5841,7 @@ static size_t postcopy_rdma_outgoing_bg_save_page(
     if (outgoing->inflight[save->rdma_index].bytes > RDMA_MERGE_MAX) {
         ret = postcopy_rdma_outgoing_bg_done(outgoing);
         if (ret) {
+            DPRINTF("%s:%d ret %d\n", __func__, __LINE__, ret);
             goto error;
         }
     }
@@ -6158,6 +6181,8 @@ static int rdma_poscopy_incoming_alloc_pd_cq_qp(
         RDMA_POSTCOPY_REQ_MAX
         /* for Register Result */
         + RDMA_POSTCOPY_REQ_MAX
+        /* for Compress Result */
+        + RDMA_POSTCOPY_REQ_MAX
         /* for Ready */
         + RDMA_POSTCOPY_REQ_MAX
         /* for EOC */
@@ -6165,6 +6190,8 @@ static int rdma_poscopy_incoming_alloc_pd_cq_qp(
     uint32_t rcqe =
         /* for RDMA Result */
         RDMA_POSTCOPY_REQ_MAX
+        /* for RDMA Compress */
+        + RDMA_POSTCOPY_REQ_MAX
         /* Register request */
         + RDMA_POSTCOPY_REQ_MAX
         /* RDMA Result BG */
@@ -6311,6 +6338,34 @@ static int postcopy_rdma_incoming_rdma_accept(RDMAPostcopyIncoming *incoming,
     };
     struct ibv_context *verbs;
     int ret = -EINVAL;
+    uint32_t scqe =
+        /* for RDMA Request */
+        RDMA_POSTCOPY_REQ_MAX
+        /* for Register Result */
+        + RDMA_POSTCOPY_REQ_MAX
+        /* for Compress Result */
+        + RDMA_POSTCOPY_REQ_MAX
+        /* for Ready */
+        + RDMA_POSTCOPY_REQ_MAX
+        /* for EOC */
+        + 1;
+    uint32_t rcqe =
+        /* for RDMA Result */
+        RDMA_POSTCOPY_REQ_MAX
+        /* for RDMA Compress */
+        + RDMA_POSTCOPY_REQ_MAX
+        /* Register request */
+        + RDMA_POSTCOPY_REQ_MAX
+        /* RDMA Result BG */
+        + RDMA_POSTCOPY_REQ_MAX
+        /* RDMA Result PRE forward */
+        + RDMA_POSTCOPY_REQ_MAX
+        /* RDMA Result PRE backward */
+        + RDMA_POSTCOPY_REQ_MAX
+        /* RDMA Result PRE inflight */
+        + 2
+        /* +1 for EOS */
+        + 1;
 
     DPRINTF("%s:%d\n", __func__, __LINE__);
     ret = rdma_get_cm_event(incoming->channel, &cm_event);
@@ -6400,10 +6455,10 @@ static int postcopy_rdma_incoming_rdma_accept(RDMAPostcopyIncoming *incoming,
     qemu_mutex_init(&incoming->sbuffer_lock);
     incoming->sbuffer = postcopy_rdma_buffer_init(
         incoming->pd, incoming->qp, incoming->scq, incoming->s_comp_channel,
-        RDMA_POSTCOPY_REQ_MAX * 3 + 1, false);
+        scqe, false);
     incoming->rbuffer = postcopy_rdma_buffer_init(
         incoming->pd, incoming->qp, incoming->rcq, incoming->r_comp_channel,
-        RDMA_POSTCOPY_REQ_MAX * 5 + 3, true);
+        rcqe, true);
     if (incoming->sbuffer == NULL || incoming->rbuffer == NULL) {
         DPRINTF("%s:%d postcopy_rdma_buffer_init %p %p\n",
                 __func__, __LINE__, incoming->sbuffer, incoming->rbuffer);
@@ -6857,7 +6912,7 @@ postcopy_rdma_incoming_send_rdma_request_one(RDMAPostcopyIncoming* incoming,
         return 0;
     }
 
-    assert(head->repeat <= RDMA_POSTCOPY_RDMA_REQUEST_MAX);
+    assert(head->repeat <= MAX_PAGE_NR);
     req = (RDMARequest*)(head + 1);
     for (i = 0; i < head->repeat; i++) {
         DDDPRINTF("%s:%d"
@@ -7301,9 +7356,9 @@ int postcopy_rdma_incoming_recv(RDMAPostcopyIncoming *incoming)
               control_desc[head->type], head->repeat);
     switch (head->type) {
     case RDMA_CONTROL_EOS:
+        postcopy_rdma_buffer_post_recv_data(incoming->rbuffer, data);
         postcopy_incoming_umem_req_eoc();
         postcopy_incoming_umem_eos_received();
-        postcopy_rdma_buffer_post_recv_data(incoming->rbuffer, data);
         break;
     case RDMA_CONTROL_RDMA_RESULT:
         ret = postcopy_rdma_incoming_rmda_result(incoming, data);
