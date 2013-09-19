@@ -5668,7 +5668,8 @@ static size_t postcopy_rdma_outgoing_bg_save_page(
         }
         head = (RDMAControlHeader *)data->data;
 
-        if (can_use_buffer_find_nonzero_offset((void *)host, size) &&
+        if (migrate_postcopy_outgoing_rdma_compress() &&
+            can_use_buffer_find_nonzero_offset((void *)host, size) &&
             buffer_find_nonzero_offset((void *)host, size) == size) {
             RDMACompress *comp;
             uint8_t *chunk_end;
