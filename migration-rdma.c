@@ -4057,6 +4057,7 @@ static int postcopy_rdma_buffer_get_wc(
         }
         ret = postcopy_rdma_buffer_poll(buffer, &wr_id, &opcode, data);
         if (ret < 0) {
+            DPRINTF("%s:%d ret %d\n", __func__, __LINE__, ret);
             break;
         }
         if (ret == 1) {
@@ -4883,6 +4884,7 @@ static int postcopy_rdma_outgoing_reap_sbuffer(RDMAPostcopyOutgoing *outgoing)
         ret = postcopy_rdma_buffer_poll(outgoing->sbuffer,
                                         &wr_id, &opcode, &data);
         if (ret < 0) {
+            DPRINTF("%s:%d ret %d\n", __func__, __LINE__, ret);
             break;
         }
         if (ret == 0) {
@@ -5995,7 +5997,7 @@ int postcopy_rdma_outgoing_loop(MigrationState *ms,
         ret = postcopy_rdma_buffer_poll(outgoing->rbuffer,
                                         &wr_id, &opcode, &data);
         if (ret < 0) {
-            DPRINTF("%s:%d\n", __func__, __LINE__);
+            DPRINTF("%s:%d ret %d\n", __func__, __LINE__, ret);
             return ret;
         }
         if (ret == 0) {
@@ -6116,6 +6118,7 @@ postcopy_rdma_incoming_sbuffer_alloc(RDMAPostcopyIncoming *incoming,
             ret = postcopy_rdma_buffer_poll(incoming->sbuffer,
                                             &wr_id, &opcode, &data);
             if (ret < 0) {
+                DPRINTF("%s:%d ret %d\n", __func__, __LINE__, ret);
                 goto out;
             }
             if (ret == 0) {
@@ -7285,6 +7288,7 @@ int postcopy_rdma_incoming_recv(RDMAPostcopyIncoming *incoming)
     ret = postcopy_rdma_buffer_get_wc(incoming->rbuffer, &data,
                                       incoming->rdma);
     if (ret) {
+        DPRINTF("%s:%d ret %d\n", __func__, __LINE__, ret);
         return ret;
     }
     if (data == NULL) {
