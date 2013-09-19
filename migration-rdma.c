@@ -446,6 +446,7 @@ typedef struct RDMAContext {
     /* index of the chunk in the current ram block */
     int current_chunk;
 
+    bool keep_listen_id;
     bool pin_all;
     bool postcopy;
 
@@ -2361,17 +2362,20 @@ static void qemu_rdma_cleanup(RDMAContext *rdma)
         ibv_dealloc_pd(rdma->pd);
         rdma->pd = NULL;
     }
-    if (rdma->listen_id) {
-        rdma_destroy_id(rdma->listen_id);
-        rdma->listen_id = NULL;
-    }
     if (rdma->cm_id) {
         rdma_destroy_id(rdma->cm_id);
         rdma->cm_id = NULL;
     }
-    if (rdma->channel) {
-        rdma_destroy_event_channel(rdma->channel);
-        rdma->channel = NULL;
+    if (!rdma->keep_listen_id) {
+        /* Hack for postcopy */
+        if (rdma->listen_id) {
+            rdma_destroy_id(rdma->listen_id);
+            rdma->listen_id = NULL;
+        }
+        if (rdma->channel) {
+            rdma_destroy_event_channel(rdma->channel);
+            rdma->channel = NULL;
+        }
     }
     g_free(rdma->host);
     rdma->host = NULL;
@@ -3002,8 +3006,10 @@ static int qemu_rdma_accept(RDMAContext *rdma)
     verbs = cm_event->id->verbs;
 
     rdma_ack_cm_event(cm_event);
-    rdma_destroy_id(rdma->listen_id);
-    rdma->listen_id = NULL;
+    if (!rdma->postcopy) {
+        rdma_destroy_id(rdma->listen_id);
+        rdma->listen_id = NULL;
+    }
 
     DPRINTF("Memory pin all: %s\n", rdma->pin_all ? "enabled" : "disabled");
     DPRINTF("Postcopy: %s\n", rdma->postcopy ? "enabled" : "disabled");
@@ -6545,9 +6551,25 @@ int postcopy_rdma_incoming_umemd_read_clean_bitmap(
     return 0;
 }
 
-RDMAPostcopyIncoming*
-postcopy_rdma_incoming_init(UMemBlockHead *umem_blocks, bool precopy_enabled)
+void postcopy_rdma_incoming_prefork(QEMUFile *f, RDMAPostcopyIncomingInit *arg)
 {
+    QEMUFileRDMA *r = qemu_file_opaque(f);
+    RDMAContext *rdma = r->rdma;
+    rdma->keep_listen_id = true;
+    arg->channel = rdma->channel;
+    arg->listen_id = rdma->listen_id;
+}
+
+void postcopy_rdma_incoming_postfork_parent(RDMAPostcopyIncomingInit *arg)
+{
+    rdma_destroy_event_channel(arg->channel);
+}
+
+RDMAPostcopyIncoming*
+postcopy_rdma_incoming_init(RDMAPostcopyIncomingInit *arg)
+{
+    UMemBlockHead *umem_blocks = arg->umem_blocks;
+    bool precopy_enabled = arg->precopy_enabled;
     int ret;
     RDMAContext *rdma = NULL;
     RDMAPostcopyIncoming* incoming = g_malloc0(sizeof(*incoming));
@@ -6567,21 +6589,11 @@ postcopy_rdma_incoming_init(UMemBlockHead *umem_blocks, bool precopy_enabled)
     DPRINTF("%s:%d qemu_rdma_data_init success\n", __func__, __LINE__);
     incoming->rdma = rdma;
 
-    ret = qemu_rdma_dest_init(rdma, NULL);
-    if (ret) {
-        DPRINTF("%s:%d\n", __func__, __LINE__);
-        goto error;
-    }
+    rdma->channel = arg->channel;
+    rdma->listen_id = arg->listen_id;
     DPRINTF("%s:%d qemu_rdma_dest_init success channel %p\n",
             __func__, __LINE__, rdma->channel);
     incoming->channel = rdma->channel;
-
-    ret = rdma_listen(rdma->listen_id, 1);
-    if (ret) {
-        DPRINTF("%s:%d\n", __func__, __LINE__);
-        goto error;
-    }
-    DPRINTF("%s:%d rdma_listen success\n", __func__, __LINE__);
 
     ret = postcopy_rdma_incoming_rdma_accept(incoming, umem_blocks);
     if (ret) {

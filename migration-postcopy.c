@@ -1274,6 +1274,7 @@ static int postcopy_incoming_create_umemd(QEMUFile *mig_read)
     int qemu_fault_write_fd;
     pid_t child;
     bool is_rdma = qemu_file_is_rdma(mig_read);
+    RDMAPostcopyIncomingInit arg;
     assert(is_rdma ||
            (fcntl(qemu_get_fd(mig_read), F_GETFL) & O_ACCMODE) == O_RDWR);
 
@@ -1306,6 +1307,7 @@ static int postcopy_incoming_create_umemd(QEMUFile *mig_read)
     qemu_fault_write_fd = fds[1];
 
     if (is_rdma) {
+        postcopy_rdma_incoming_prefork(mig_read, &arg);
         qemu_fclose_null(mig_read, NULL, NULL);
         /* ibverb isn't compatible with fork.
          * Child process will again establish connection again.
@@ -1322,6 +1324,7 @@ static int postcopy_incoming_create_umemd(QEMUFile *mig_read)
     if (child == 0) {
         UMemBlock *block;
 
+        DPRINTF("fork child daemon\n");
         /* needs to fork before rdma setup */
         qemu_daemon(1, 1);
 
@@ -1354,8 +1357,9 @@ static int postcopy_incoming_create_umemd(QEMUFile *mig_read)
         qemu_file_set_thread(mig_read, true);
         if (is_rdma) {
             /* setup rdma connection again */
-            umemd.rdma = postcopy_rdma_incoming_init(&umemd.blocks,
-                                                     umemd.precopy_enabled);
+            arg.umem_blocks = &umemd.blocks;
+            arg.precopy_enabled = umemd.precopy_enabled;
+            umemd.rdma = postcopy_rdma_incoming_init(&arg);
         } else {
             /* process_incoming_migration set mig_read to non-blocking
              * mode with corouting for qmp working.
@@ -1379,6 +1383,9 @@ static int postcopy_incoming_create_umemd(QEMUFile *mig_read)
         return -EINVAL;
     }
 
+    if (is_rdma) {
+        postcopy_rdma_incoming_postfork_parent(&arg);
+    }
     qemu_add_child_watch(child);
     fd_close(&umemd.to_qemu_fd);
     fd_close(&umemd.from_qemu_fd);

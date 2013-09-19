@@ -45,6 +45,15 @@ int postcopy_rdma_incoming_send_req(RDMAPostcopyIncoming *incoming,
     return -ENOSYS;
 }
 
+void postcopy_rdma_incoming_prefork(QEMUFile *f,
+                                    RDMAPostcopyIncomingInit *arg)
+{
+}
+
+void postcopy_rdma_incoming_postfork_parent(RDMAPostcopyIncomingInit *arg)
+{
+}
+
 RDMAPostcopyIncoming*
 postcopy_rdma_incoming_init(UMemBlockHead *umem_blocks, bool precopy_enabled)
 {

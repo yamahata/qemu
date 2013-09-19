@@ -34,9 +34,19 @@ int postcopy_rdma_outgoing_loop(MigrationState *ms,
 
 /* rdma incoming */
 typedef struct RDMAPostcopyIncoming RDMAPostcopyIncoming;
+struct RDMAPostcopyIncomingInit {
+    UMemBlockHead *umem_blocks;
+    bool precopy_enabled;
+    struct rdma_event_channel *channel;
+    struct rdma_cm_id *listen_id;
+};
+typedef struct RDMAPostcopyIncomingInit RDMAPostcopyIncomingInit;
 
-RDMAPostcopyIncoming* postcopy_rdma_incoming_init(UMemBlockHead *umem_blocks,
-                                                  bool precopy_enabled);
+void postcopy_rdma_incoming_prefork(QEMUFile *f,
+                                    RDMAPostcopyIncomingInit *arg);
+void postcopy_rdma_incoming_postfork_parent(RDMAPostcopyIncomingInit *arg);
+RDMAPostcopyIncoming* postcopy_rdma_incoming_init(
+    RDMAPostcopyIncomingInit *arg);
 void postcopy_rdma_incoming_cleanup(RDMAPostcopyIncoming *rdma);
 int postcopy_rdma_incoming_umemd_read_clean_bitmap(
     RDMAPostcopyIncoming *incoming, UMemBlockHead *umem_blocks);
