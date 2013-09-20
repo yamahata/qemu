@@ -3939,8 +3939,9 @@ static int postcopy_rdma_buffer_poll(RDMAPostcopyBuffer *buffer,
     *wr_id = wc.wr_id;
     *opcode = wc.opcode;
     if (wc.status != IBV_WC_SUCCESS) {
-        DPRINTF("error wr_id 0x%"PRIx64" opcode %d status %d %s\n",
-                wc.wr_id, wc.opcode, wc.status, ibv_wc_status_str(wc.status));
+        DPRINTF("error wr_id 0x%"PRIx64" status %d %s vendor_err %"PRId32"\n",
+                wc.wr_id, wc.status, ibv_wc_status_str(wc.status),
+                wc.vendor_err);
         return -wc.status;
     }
 
