@@ -6794,7 +6794,7 @@ static int postcopy_rdma_incoming_reg_mr(
         if (local_block->pmr[chunk] == NULL) {
             perror("Failed to register chunk!");
             DPRINTF("%s:%d total registrations %d"
-                    " block_index %d chunk 0x%x addr 0x%p"
+                    " block_index %d chunk 0x%x addr %p"
                     " size 0x%zx\n",
                     __func__, __LINE__,
                     incoming->rdma->total_registrations,
@@ -6804,7 +6804,7 @@ static int postcopy_rdma_incoming_reg_mr(
         }
         incoming->rdma->total_registrations++;
         DDPRINTF("%s:%d block_index %d chunk %x"
-                 " start 0x%p size 0x%zx rkey %"PRIx32" total %d\n",
+                 " start %p size 0x%zx rkey %"PRIx32" total %d\n",
                  __func__, __LINE__,
                  local_block->index, chunk, chunk_start, size,
                  local_block->pmr[chunk]->rkey,
