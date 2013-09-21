@@ -5815,8 +5815,7 @@ static size_t postcopy_rdma_outgoing_bg_save_page(
             data = postcopy_rdma_buffer_get_data(outgoing->sbuffer,
                                                  save->rdma_index);
             head = (RDMAControlHeader *)data->data;
-            if (head->repeat >= MAX_PAGE_NR ||
-                save->local_block->index != local_block->index) {
+            if (head->repeat >= MAX_PAGE_NR) {
                 ret = postcopy_rdma_outgoing_bg_done(outgoing);
                 if (ret) {
                     DPRINTF("%s:%d ret %d\n", __func__, __LINE__, ret);
