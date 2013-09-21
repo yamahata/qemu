@@ -4666,9 +4666,9 @@ int postcopy_rdma_outgoing(MigrationState *ms, MigrationRateLimitStat *rlstat)
     uint32_t scqe =
         /* for RDMA Result */
         RDMA_POSTCOPY_REQ_MAX
-        /* for Register Request */
-        + RDMA_POSTCOPY_REQ_MAX
         /* for RDMA COMPRESS */
+        + RDMA_POSTCOPY_REQ_MAX + 1
+        /* for Register Request */
         + RDMA_POSTCOPY_REQ_MAX
         /* for RDMA Result BG */
         + RDMA_POSTCOPY_REQ_MAX
@@ -4905,7 +4905,7 @@ static int postcopy_rdma_outgoing_reap_sbuffer(RDMAPostcopyOutgoing *outgoing)
         assert(ret == 1);
 
         ret = 0;
-        assert(wr_id < RDMA_POSTCOPY_REQ_MAX * 6 + 1);
+        assert(wr_id < RDMA_POSTCOPY_REQ_MAX * 6 + 2);
         switch (opcode) {
         case IBV_WC_SEND:
             DDPRINTF("%s:%d SEND wr_id %"PRIx64"\n",
@@ -6356,8 +6356,8 @@ static int postcopy_rdma_incoming_rdma_accept(RDMAPostcopyIncoming *incoming,
     uint32_t rcqe =
         /* for RDMA Result */
         RDMA_POSTCOPY_REQ_MAX
-        /* for RDMA Compress */
-        + RDMA_POSTCOPY_REQ_MAX
+        /* for RDMA Compress : +1 */
+        + RDMA_POSTCOPY_REQ_MAX + 1
         /* Register request */
         + RDMA_POSTCOPY_REQ_MAX
         /* RDMA Result BG */
