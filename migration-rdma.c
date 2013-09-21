@@ -350,7 +350,7 @@ typedef struct RDMALocalBlock {
     UMemBlock *umem_block;
 
     /* for postcopy outgoing/incoming */
-    int bit;
+    int *bit;
     struct ibv_mr *bitmap_key;  /* for clean bitmap */
 } RDMALocalBlock;
 
@@ -649,6 +649,7 @@ static int __qemu_rdma_add_block(RDMAContext *rdma, void *host_addr,
     RDMALocalBlock *block = g_hash_table_lookup(rdma->blockmap,
         (void *) block_offset);
     RDMALocalBlock *old = local->block;
+    int chunk;
 
     assert(block == NULL);
 
@@ -678,7 +679,11 @@ static int __qemu_rdma_add_block(RDMAContext *rdma, void *host_addr,
     block->unregister_bitmap = bitmap_new(block->nb_chunks);
     bitmap_clear(block->unregister_bitmap, 0, block->nb_chunks);
     block->remote_keys = g_malloc0(block->nb_chunks * sizeof(uint32_t));
-    block->bit = -1;
+    block->bit = g_malloc(block->nb_chunks * sizeof(block->bit[0]));
+    for (chunk = 0; chunk < block->nb_chunks; chunk++) {
+        block->bit[chunk] =
+            (chunk << RDMA_REG_CHUNK_SHIFT) >> TARGET_PAGE_BITS;
+    }
 
     block->is_ram_block = local->init ? false : true;
 
@@ -769,6 +774,9 @@ static int __qemu_rdma_delete_block(RDMAContext *rdma, ram_addr_t block_offset)
 
     g_free(block->nb_rdma);
     block->nb_rdma = NULL;
+
+    g_free(block->bit);
+    block->bit = NULL;
 
     for (x = 0; x < local->nb_blocks; x++) {
         g_hash_table_remove(rdma->blockmap, (void *)old[x].offset);
@@ -4806,15 +4814,12 @@ static void postcopy_rdma_outgoing_rdma_done(RDMAPostcopyOutgoing *outgoing,
         if (local_block->pmr[chunk] == NULL) {
             continue;
         }
-        if (local_block->bit < 0) {
-            local_block->bit = bit_s;
-        }
-        if (test_bit(local_block->bit, migration_bitmap)) {
+        if (test_bit(local_block->bit[chunk], migration_bitmap)) {
             continue;
         }
-        local_block->bit = find_next_bit(migration_bitmap,
-                                         bit_e, local_block->bit);
-        if (local_block->bit == bit_e) {
+        local_block->bit[chunk] = find_next_bit(migration_bitmap, bit_e,
+                                                local_block->bit[chunk]);
+        if (local_block->bit[chunk] == bit_e) {
             DDDPRINTF("%s:%d dereg block_index %d chunk %"PRIx64"\n",
                       __func__, __LINE__, local_block->index, chunk);
             ibv_dereg_mr(local_block->pmr[chunk]);
@@ -7070,15 +7075,13 @@ static int postcopy_rdma_incoming_page_received_one(
             postcopy_rdma_incoming_dereg_mr(incoming, local_block, chunk);
             continue;
         }
-        if (local_block->bit < 0) {
-            local_block->bit = bit_s;
-        }
-        if (!test_bit(local_block->bit, umem_block->phys_received)) {
+        if (!test_bit(local_block->bit[chunk], umem_block->phys_received)) {
             continue;
         }
-        local_block->bit = find_next_zero_bit(umem_block->phys_received,
-                                              bit_e, local_block->bit);
-        if (local_block->bit == bit_e && local_block->pmr[chunk]) {
+        local_block->bit[chunk] =
+            find_next_zero_bit(umem_block->phys_received, bit_e,
+                               local_block->bit[chunk]);
+        if (local_block->bit[chunk] == bit_e && local_block->pmr[chunk]) {
             postcopy_rdma_incoming_dereg_mr(incoming, local_block, chunk);
         }
     }
