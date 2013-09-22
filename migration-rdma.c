@@ -4150,6 +4150,67 @@ static void postcopy_rdma_buffer_drain(RDMAPostcopyBuffer *buffer)
     }
 }
 
+#define RDMA_POSTCOPY_EMPTY_WRID        (~0ULL)
+static void postcopy_rdma_buffer_cq_empty(RDMAPostcopyBuffer *buffer)
+{
+    int ret;
+    struct ibv_send_wr wr = {
+        .wr_id = RDMA_POSTCOPY_EMPTY_WRID,
+        .opcode = IBV_WR_SEND,
+        .send_flags = IBV_SEND_SIGNALED,
+        .sg_list = NULL,
+        .num_sge = 0,
+    };
+    struct ibv_send_wr *bad_wr;
+
+    postcopy_rdma_buffer_drain(buffer);
+    ret = ibv_req_notify_cq(buffer->cq, 0);
+    if (ret) {
+        DPRINTF("%s:%d ret %d\n", __func__, __LINE__, ret);
+        return;
+    }
+
+    ret = ibv_post_send(buffer->qp, &wr, &bad_wr);
+    if (ret) {
+        DPRINTF("%s:%d ret %d\n", __func__, __LINE__, ret);
+        return;
+    }
+
+    while (true) {
+        struct ibv_cq *cq;
+        void *cq_ctx;
+
+        ret = ibv_get_cq_event(buffer->channel, &cq, &cq_ctx);
+        if (ret) {
+            DPRINTF("%s:%d ret %d\n", __func__, __LINE__, ret);
+            return;
+        }
+        ret = ibv_req_notify_cq(buffer->cq, 0);
+        if (ret) {
+            DPRINTF("%s:%d ret %d\n", __func__, __LINE__, ret);
+            return;
+        }
+        ibv_ack_cq_events(buffer->cq, 1);
+
+        while (true) {
+            struct ibv_wc wc;
+            ret = ibv_poll_cq(buffer->cq, 1, &wc);
+            if (ret < 0) {
+                DPRINTF("%s:%d ret %d\n", __func__, __LINE__, ret);
+                return;
+            }
+            if (ret == 0) {
+                break;
+            }
+            assert(ret == 1);
+
+            if (wc.wr_id == RDMA_POSTCOPY_EMPTY_WRID) {
+                return;
+            }
+        }
+    }
+}
+
 /****************************************************************************
  * RDMA postcopy outgoing part
  */
@@ -4233,6 +4294,7 @@ void postcopy_rdma_outgoing_cleanup(RDMAPostcopyOutgoing *outgoing)
     struct rdma_cm_event *cm_event;
 
     if (rdma && rdma->cm_id && rdma->connected) {
+        postcopy_rdma_buffer_cq_empty(outgoing->sbuffer);
         int ret = rdma_disconnect(rdma->cm_id);
         if (!ret) {
             DDPRINTF("waiting for disconnect\n");
@@ -6743,6 +6805,7 @@ void postcopy_rdma_incoming_cleanup(RDMAPostcopyIncoming *incoming)
     qemu_mutex_destroy(&incoming->mutex);
     qemu_cond_destroy(&incoming->cond);
     if (rdma->cm_id && rdma->connected) {
+        postcopy_rdma_buffer_cq_empty(incoming->sbuffer);
         int ret = rdma_disconnect(rdma->cm_id);
         if (!ret) {
             DDPRINTF("waiting for disconnect\n");
