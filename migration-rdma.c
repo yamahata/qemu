@@ -2524,6 +2524,7 @@ static int qemu_rdma_connect(RDMAContext *rdma, Error **errp)
     }
     if (rdma->postcopy && !(cap.flags & RDMA_CAPABILITY_POSTCOPY)) {
         ERROR(errp, "Server cannot support postcopy.\n");
+        rdma_ack_cm_event(cm_event);
         rdma->postcopy = false;
         goto err_rdma_source_connect;
     }
@@ -3010,6 +3011,7 @@ static int qemu_rdma_accept(RDMAContext *rdma)
         rdma->postcopy = true;
         ret = postcopy_incoming_prepare(&umem_blocks);
         if (ret) {
+            rdma_ack_cm_event(cm_event);
             goto err_rdma_dest_wait;
         }
     }
@@ -4129,6 +4131,25 @@ static int postcopy_rdma_buffer_get_wc(
     return ret;
 }
 
+static void postcopy_rdma_buffer_drain(RDMAPostcopyBuffer *buffer)
+{
+    while (true) {
+        int ret;
+        uint64_t wr_id;
+        enum ibv_wc_opcode opcode;
+        RDMAPostcopyData *data;
+
+        ret = postcopy_rdma_buffer_poll(buffer, &wr_id, &opcode, &data);
+        if (ret < 0) {
+            DPRINTF("%s:%d ret %d\n", __func__, __LINE__, ret);
+            break;
+        }
+        if (ret == 0) {
+            break;
+        }
+    }
+}
+
 /****************************************************************************
  * RDMA postcopy outgoing part
  */
@@ -4222,6 +4243,9 @@ void postcopy_rdma_outgoing_cleanup(RDMAPostcopyOutgoing *outgoing)
         }
         DDPRINTF("Disconnected.\n");
         rdma->connected = false;
+
+        postcopy_rdma_buffer_drain(outgoing->rbuffer);
+        postcopy_rdma_buffer_drain(outgoing->sbuffer);
     }
     if (outgoing->qp) {
         rdma_destroy_qp(outgoing->rdma->cm_id);
@@ -6425,6 +6449,7 @@ static int postcopy_rdma_incoming_rdma_accept(RDMAPostcopyIncoming *incoming,
     }
     if (rdma->pin_all && rdma->postcopy) {
         fprintf(stderr, "rdma postcopy doesn't support pin-all.\n");
+        rdma_ack_cm_event(cm_event);
         goto err_rdma_dest_wait;
     }
 
@@ -6500,6 +6525,7 @@ static int postcopy_rdma_incoming_rdma_accept(RDMAPostcopyIncoming *incoming,
     ret = rdma_get_cm_event(incoming->channel, &cm_event);
     if (ret) {
         fprintf(stderr, "rdma_accept get_cm_event failed %d!\n", ret);
+        rdma_ack_cm_event(cm_event);
         goto err_rdma_dest_wait;
     }
 
@@ -6727,6 +6753,9 @@ void postcopy_rdma_incoming_cleanup(RDMAPostcopyIncoming *incoming)
         }
         DDPRINTF("Disconnected.\n");
         rdma->connected = false;
+
+        postcopy_rdma_buffer_drain(incoming->rbuffer);
+        postcopy_rdma_buffer_drain(incoming->sbuffer);
     }
     DDDPRINTF("%s:%d\n", __func__, __LINE__);
     if (incoming->qp) {
