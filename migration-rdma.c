@@ -6800,13 +6800,15 @@ void postcopy_rdma_incoming_cleanup(RDMAPostcopyIncoming *incoming)
 {
     RDMAContext *rdma = incoming->rdma;
     struct rdma_cm_event *cm_event;
+    RDMALocalBlocks *local_ram_blocks = &incoming->rdma->local_ram_blocks;
+    int i;
 
     DDDPRINTF("%s:%d\n", __func__, __LINE__);
-    qemu_mutex_destroy(&incoming->mutex);
-    qemu_cond_destroy(&incoming->cond);
     if (rdma->cm_id && rdma->connected) {
+        int ret;
+
         postcopy_rdma_buffer_cq_empty(incoming->sbuffer);
-        int ret = rdma_disconnect(rdma->cm_id);
+        ret = rdma_disconnect(rdma->cm_id);
         if (!ret) {
             DDPRINTF("waiting for disconnect\n");
             ret = rdma_get_cm_event(rdma->channel, &cm_event);
@@ -6865,24 +6867,22 @@ void postcopy_rdma_incoming_cleanup(RDMAPostcopyIncoming *incoming)
         rdma_destroy_event_channel(rdma->channel);
         rdma->channel = NULL;
     }
-#if 1
-    DDDPRINTF("%s:%d\n", __func__, __LINE__);
-    {
-        RDMALocalBlocks *local_ram_blocks = &incoming->rdma->local_ram_blocks;
-        int i;
-        DPRINTF("%s:%d mr cleanup\n", __func__, __LINE__);
-        for (i = 0; i < local_ram_blocks->nb_blocks; ++i) {
-            RDMALocalBlock *local_block = &local_ram_blocks->block[i];
-            int chunk;
-            for (chunk = 0; chunk < local_block->nb_chunks; ++chunk) {
-                if (local_block->pmr[chunk]) {
-                    postcopy_rdma_incoming_dereg_mr(incoming, local_block,
-                                                    chunk);
-                }
+
+    DPRINTF("%s:%d mr cleanup\n", __func__, __LINE__);
+    for (i = 0; i < local_ram_blocks->nb_blocks; ++i) {
+        RDMALocalBlock *local_block = &local_ram_blocks->block[i];
+        int chunk;
+        if (!local_block->pmr) {
+            continue;
+        }
+        for (chunk = 0; chunk < local_block->nb_chunks; ++chunk) {
+            if (local_block->pmr[chunk]) {
+                postcopy_rdma_incoming_dereg_mr(incoming, local_block,
+                                                chunk);
             }
         }
     }
-#endif
+
     DDDPRINTF("%s:%d\n", __func__, __LINE__);
     if (incoming->rdma) {
         qemu_rdma_cleanup(incoming->rdma);
@@ -6897,6 +6897,8 @@ void postcopy_rdma_incoming_cleanup(RDMAPostcopyIncoming *incoming)
         postcopy_rdma_buffer_destroy(incoming->rbuffer);
     }
     DDDPRINTF("%s:%d\n", __func__, __LINE__);
+    qemu_mutex_destroy(&incoming->mutex);
+    qemu_cond_destroy(&incoming->cond);
     g_free(rdma);
     g_free(incoming);
 }
