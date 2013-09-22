@@ -2719,6 +2719,10 @@ static void postcopy_incoming_umemd(void)
     fd_close(&umemd.fault_write_fd);
     qemu_thread_join(&umemd_fault_thread);
 
+    if (umemd.rdma) {
+        postcopy_rdma_incoming_cleanup(umemd.rdma);
+    }
+
     g_free(umemd.page_request);
     g_free(umemd.page_clean);
     g_free(umemd.page_cached);
@@ -2728,10 +2732,6 @@ static void postcopy_incoming_umemd(void)
     qemu_mutex_destroy(&umemd.pending_clean_mutex);
     qemu_cond_destroy(&umemd.pending_clean_cond);
     assert(umemd.nr_pending_clean == 0);
-
-    if (umemd.rdma) {
-        postcopy_rdma_incoming_cleanup(umemd.rdma);
-    }
 
     DPRINTF("umemd done\n");
     /* This daemon forked from qemu and the parent qemu is still running.
