@@ -4893,9 +4893,11 @@ static void postcopy_rdma_outgoing_rdma_done(RDMAPostcopyOutgoing *outgoing,
             &outgoing->rdma->local_ram_blocks.block[result->block_index];
         chunk = ram_chunk_index((uint8_t*)local_block->remote_host_addr,
                                 (uint8_t*)result->host_addr);
-        bit_s = (chunk << RDMA_REG_CHUNK_SHIFT) >> TARGET_PAGE_BITS;
+        bit_s = (local_block->offset + (chunk << RDMA_REG_CHUNK_SHIFT)) >>
+            TARGET_PAGE_BITS;
         bit_e = MIN(bit_s + (RDMA_REG_CHUNK_SIZE >> TARGET_PAGE_BITS),
-                    local_block->length >> TARGET_PAGE_BITS);
+                    ((local_block->offset + local_block->length) >>
+                     TARGET_PAGE_BITS) + 1);
 
         local_block->nb_rdma[chunk]--;
         if (local_block->nb_rdma[chunk] > 0) {
@@ -6803,6 +6805,21 @@ void postcopy_rdma_incoming_cleanup(RDMAPostcopyIncoming *incoming)
     RDMALocalBlocks *local_ram_blocks = &incoming->rdma->local_ram_blocks;
     int i;
 
+    DPRINTF("%s:%d mr cleanup\n", __func__, __LINE__);
+    for (i = 0; i < local_ram_blocks->nb_blocks; ++i) {
+        RDMALocalBlock *local_block = &local_ram_blocks->block[i];
+        int chunk;
+        if (!local_block->pmr) {
+            continue;
+        }
+        for (chunk = 0; chunk < local_block->nb_chunks; ++chunk) {
+            if (local_block->pmr[chunk]) {
+                postcopy_rdma_incoming_dereg_mr(incoming, local_block,
+                                                chunk);
+            }
+        }
+    }
+
     DDDPRINTF("%s:%d\n", __func__, __LINE__);
     if (rdma->cm_id && rdma->connected) {
         int ret;
@@ -6866,21 +6883,6 @@ void postcopy_rdma_incoming_cleanup(RDMAPostcopyIncoming *incoming)
     if (rdma->channel) {
         rdma_destroy_event_channel(rdma->channel);
         rdma->channel = NULL;
-    }
-
-    DPRINTF("%s:%d mr cleanup\n", __func__, __LINE__);
-    for (i = 0; i < local_ram_blocks->nb_blocks; ++i) {
-        RDMALocalBlock *local_block = &local_ram_blocks->block[i];
-        int chunk;
-        if (!local_block->pmr) {
-            continue;
-        }
-        for (chunk = 0; chunk < local_block->nb_chunks; ++chunk) {
-            if (local_block->pmr[chunk]) {
-                postcopy_rdma_incoming_dereg_mr(incoming, local_block,
-                                                chunk);
-            }
-        }
     }
 
     DDDPRINTF("%s:%d\n", __func__, __LINE__);
@@ -7201,12 +7203,11 @@ static int postcopy_rdma_incoming_page_received_one(
     host_bit_s = (host_s - (uint64_t)umem->shmem) >> TARGET_PAGE_BITS;
     host_bit_e = (host_e - (uint64_t)umem->shmem) >> TARGET_PAGE_BITS;
     chunk_s = ram_chunk_index(umem->shmem, (uint8_t*)host_s);
-    host_e = ROUND_UP(host_e, RDMA_REG_CHUNK_SIZE);
-    chunk_e = ram_chunk_index(umem->shmem, (uint8_t*)host_e);
-    for (chunk = chunk_s; chunk < chunk_e; chunk++) {
+    chunk_e = ram_chunk_index(umem->shmem, (uint8_t*)host_e - 1);
+    for (chunk = chunk_s; chunk <= chunk_e; chunk++) {
         int bit_s = (chunk_s << RDMA_REG_CHUNK_SHIFT) >> TARGET_PAGE_BITS;
         int bit_e = MIN(bit_s + (RDMA_REG_CHUNK_SIZE >> TARGET_PAGE_BITS),
-                        umem_block->length >> TARGET_PAGE_BITS);
+                        (umem_block->length >> TARGET_PAGE_BITS) + 1);
 
         if (local_block->pmr[chunk] == NULL) {
             continue;
@@ -7221,7 +7222,7 @@ static int postcopy_rdma_incoming_page_received_one(
         local_block->bit[chunk] =
             find_next_zero_bit(umem_block->phys_received, bit_e,
                                local_block->bit[chunk]);
-        if (local_block->bit[chunk] == bit_e && local_block->pmr[chunk]) {
+        if (local_block->bit[chunk] == bit_e) {
             postcopy_rdma_incoming_dereg_mr(incoming, local_block, chunk);
         }
     }
