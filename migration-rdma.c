@@ -6138,6 +6138,7 @@ struct RDMAPostcopyIncoming
     QemuMutex mutex;
     QemuCond cond;
     unsigned int nb_rdma_req;
+    bool eos_received;
 };
 
 static int
@@ -6991,8 +6992,13 @@ postcopy_rdma_incoming_send_rdma_request(RDMAPostcopyIncoming* incoming,
 
     while (nr > 0) {
         qemu_mutex_lock(&incoming->mutex);
-        while (incoming->nb_rdma_req >= RDMA_POSTCOPY_REQ_MAX) {
+        while (incoming->nb_rdma_req >= RDMA_POSTCOPY_REQ_MAX &&
+               !incoming->eos_received) {
             qemu_cond_wait(&incoming->cond, &incoming->mutex);
+        }
+        if (incoming->eos_received) {
+            qemu_mutex_unlock(&incoming->mutex);
+            return -EINVAL;
         }
         incoming->nb_rdma_req++;
         qemu_mutex_unlock(&incoming->mutex);
@@ -7404,6 +7410,11 @@ int postcopy_rdma_incoming_recv(RDMAPostcopyIncoming *incoming)
     switch (head->type) {
     case RDMA_CONTROL_EOS:
         postcopy_rdma_buffer_post_recv_data(incoming->rbuffer, data);
+        qemu_mutex_lock(&incoming->mutex);
+        incoming->eos_received = true;
+        qemu_mutex_unlock(&incoming->mutex);
+        qemu_cond_broadcast(&incoming->cond);
+
         postcopy_incoming_umem_req_eoc();
         postcopy_incoming_umem_eos_received();
         break;
