@@ -2072,8 +2072,9 @@ static int postcopy_incoming_umemd_pending_clean_loop(void)
 
     DPRINTF("pending clean bitmap\n");
     QLIST_FOREACH(block, &umemd.blocks, next) {
-        const int nbits = (block->length >> umemd.host_page_shift) + 1;
-        int bit;
+        const unsigned long nbits =
+            (block->length >> umemd.host_page_shift) + 1;
+        unsigned long bit;
 
         if (block->nr_pending_clean == 0) {
             continue;
@@ -2189,8 +2190,8 @@ static void *postcopy_incoming_umemd_fault_clean_bitmap(void *args)
 
     DPRINTF("faulting clean bitmap\n");
     QLIST_FOREACH(block, &umemd.blocks, next) {
-        const int nbits = (block->length >> TARGET_PAGE_BITS) + 1;
-        int bit;
+        const unsigned long nbits = (block->length >> TARGET_PAGE_BITS) + 1;
+        unsigned long bit;
         int error;
 
         DPRINTF("idstr %s\n", block->idstr);
