@@ -350,7 +350,7 @@ typedef struct RDMALocalBlock {
     UMemBlock *umem_block;
 
     /* for postcopy outgoing/incoming */
-    int *bit;
+    uint64_t *bit;
     struct ibv_mr *bitmap_key;  /* for clean bitmap */
 } RDMALocalBlock;
 
@@ -649,7 +649,7 @@ static int __qemu_rdma_add_block(RDMAContext *rdma, void *host_addr,
     RDMALocalBlock *block = g_hash_table_lookup(rdma->blockmap,
         (void *) block_offset);
     RDMALocalBlock *old = local->block;
-    int chunk;
+    uint64_t chunk;
 
     assert(block == NULL);
 
@@ -4885,8 +4885,8 @@ static void postcopy_rdma_outgoing_rdma_done(RDMAPostcopyOutgoing *outgoing,
         RDMARequest *result = (RDMARequest *)(head + 1) + i;
         RDMALocalBlock *local_block;
         uint64_t chunk;
-        int bit_s;
-        int bit_e;
+        uint64_t bit_s;
+        uint64_t bit_e;
 
         network_to_request(result);
         local_block =
@@ -5214,9 +5214,9 @@ static int postcopy_rdma_outgoing_request_handle_one(
     ram_addr_t offset_s;
     ram_addr_t offset_e;
     ram_addr_t offset;
-    int chunk_s;
-    int chunk_e;
-    int chunk;
+    uint64_t chunk_s;
+    uint64_t chunk_e;
+    uint64_t chunk;
     int ret;
 
     if (request->block_index >= rdma->local_ram_blocks.nb_blocks) {
@@ -5251,7 +5251,7 @@ static int postcopy_rdma_outgoing_request_handle_one(
             local_block->remote_keys[chunk] = request->rkey;
         } else if (local_block->remote_keys[chunk] != request->rkey) {
             DPRINTF("invalid rkey 0x%x != 0x%x"
-                    " block_index %d chunk %x addr %"PRIx64"\n",
+                    " block_index %d chunk %"PRIx64" addr %"PRIx64"\n",
                     local_block->remote_keys[chunk], request->rkey,
                     request->block_index, chunk, request->host_addr);
             return -EINVAL;
@@ -5328,7 +5328,8 @@ static int postcopy_rdma_outgoing_prefault_forward(
     postcopy_rdma_outgoing_save_init(&save);
     for (; offset < offset_e; offset += TARGET_PAGE_SIZE) {
         uint8_t *host_addr = local_block->local_host_addr + offset;
-        int chunk = ram_chunk_index(local_block->local_host_addr, host_addr);
+        uint64_t chunk = ram_chunk_index(local_block->local_host_addr,
+                                         host_addr);
         uint32_t lkey;
         uint32_t rkey = local_block->remote_keys[chunk];
 
@@ -5418,7 +5419,8 @@ static int postcopy_rdma_outgoing_prefault_backward(
     postcopy_rdma_outgoing_save_init(&save);
     for (; offset >= offset_s; offset -= TARGET_PAGE_SIZE) {
         uint8_t *host_addr = local_block->local_host_addr + offset;
-        int chunk = ram_chunk_index(local_block->local_host_addr, host_addr);
+        uint64_t chunk = ram_chunk_index(local_block->local_host_addr,
+                                         host_addr);
         uint32_t lkey;
         uint32_t rkey = local_block->remote_keys[chunk];
 
@@ -5499,7 +5501,7 @@ postcopy_rdma_outgoing_rdma_request_handle(RDMAPostcopyOutgoing *outgoing,
     ram_addr_t offset_s;
     ram_addr_t offset_e;
     RDMAPostcopyData *sdata;
-    int i;
+    uint32_t i;
     int ret;
 
     DDPRINTF("%s:%d\n", __func__, __LINE__);
@@ -5566,7 +5568,7 @@ postcopy_rdma_outgoing_register_result_handle(RDMAPostcopyOutgoing *outgoing,
     RDMAContext *rdma = outgoing->rdma;
     RDMAControlHeader *head = (RDMAControlHeader*)data->data;
     RDMAAsyncRegister *result = (RDMAAsyncRegister*)(head + 1);
-    int i;
+    uint32_t i;
 
     for (i = 0; i < head->repeat; i++) {
         RDMALocalBlock *local_block;
@@ -6619,7 +6621,7 @@ static int postcopy_rdma_incoming_bitmap_request(
     RDMAControlHeader *head = (RDMAControlHeader *)data->data;
     RDMARequest *request = (RDMARequest *)(head + 1);
     RDMALocalBlocks *local_ram_blocks = &incoming->rdma->local_ram_blocks;
-    int i;
+    uint32_t i;
 
     head->type = RDMA_CONTROL_BITMAP_REQUEST;
     head->repeat = local_ram_blocks->nb_blocks;
@@ -6650,9 +6652,13 @@ static int postcopy_rdma_incoming_bitmap_request(
     return 0;
 
 error:
-    for (; i >=0; i--) {
+    while (true) {
         ibv_dereg_mr(local_ram_blocks->block[i].bitmap_key);
         local_ram_blocks->block[i].bitmap_key = NULL;
+        i--;
+        if (i == 0) {
+            break;
+        }
     }
     return ret;
 }
@@ -6664,7 +6670,7 @@ int postcopy_rdma_incoming_umemd_read_clean_bitmap(
     RDMALocalBlocks *local_ram_blocks = &incoming->rdma->local_ram_blocks;
     RDMAPostcopyData *data;
     RDMAControlHeader *head;
-    int i;
+    uint32_t i;
 
     ret = postcopy_rdma_buffer_get_wc(incoming->rbuffer, &data,
                                       incoming->rdma);
@@ -6796,8 +6802,78 @@ error:
     return NULL;
 }
 
+/*
+ * return value
+ * 1: This mr is already deregestered. It implies that this page is
+ *    already received.
+ * 0: success
+ * -1: error
+ */
+static int postcopy_rdma_incoming_reg_mr(
+    RDMAPostcopyIncoming *incoming, RDMALocalBlock *local_block,
+    uint64_t chunk, uint32_t *rkey)
+{
+    int ret = 0;
+
+    qemu_mutex_lock(&incoming->mutex);
+    if (test_bit(chunk, local_block->unregister_bitmap)) {
+        ret = 1;
+        goto out;
+    }
+    if (local_block->pmr == NULL) {
+        local_block->pmr = g_malloc0(local_block->nb_chunks *
+                                     sizeof(struct ibv_mr*));
+    }
+    if (local_block->pmr[chunk] == NULL) {
+        uint8_t *chunk_start = ram_chunk_start(local_block, chunk);
+        size_t size = MIN(RDMA_REG_CHUNK_SIZE, local_block->length);
+        local_block->pmr[chunk] = ibv_reg_mr(
+            incoming->pd, chunk_start,
+            size, (IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE));
+        if (local_block->pmr[chunk] == NULL) {
+            perror("Failed to register chunk!");
+            DPRINTF("%s:%d total registrations %d"
+                    " block_index %d chunk 0x%"PRIx64" addr %p"
+                    " size 0x%zx\n",
+                    __func__, __LINE__,
+                    incoming->rdma->total_registrations,
+                    local_block->index, chunk, chunk_start, size);
+            ret = -1;
+            goto out;
+        }
+        incoming->rdma->total_registrations++;
+        DDPRINTF("%s:%d block_index %d chunk %"PRIx64
+                 " start %p size 0x%zx rkey %"PRIx32" total %d\n",
+                 __func__, __LINE__,
+                 local_block->index, chunk, chunk_start, size,
+                 local_block->pmr[chunk]->rkey,
+                 incoming->rdma->total_registrations);
+    }
+    *rkey = local_block->pmr[chunk]->rkey;
+
+out:
+    qemu_mutex_unlock(&incoming->mutex);
+    return ret;
+}
+
 static void postcopy_rdma_incoming_dereg_mr(
-    RDMAPostcopyIncoming *incoming, RDMALocalBlock *local_block, int chunk);
+    RDMAPostcopyIncoming *incoming, RDMALocalBlock *local_block,
+    uint64_t chunk)
+{
+    qemu_mutex_lock(&incoming->mutex);
+    assert(local_block->pmr[chunk] != NULL);
+    DDPRINTF("%s:%d block_index %d chunk %"PRIx64" rkey %"PRIx32" total %d\n",
+             __func__, __LINE__,
+             local_block->index, chunk, local_block->pmr[chunk]->rkey,
+             incoming->rdma->total_registrations);
+    assert(!test_bit(chunk, local_block->unregister_bitmap));
+    set_bit(chunk, local_block->unregister_bitmap);
+    ibv_dereg_mr(local_block->pmr[chunk]);
+    local_block->pmr[chunk] = NULL;
+    incoming->rdma->total_registrations--;
+    qemu_mutex_unlock(&incoming->mutex);
+}
+
 void postcopy_rdma_incoming_cleanup(RDMAPostcopyIncoming *incoming)
 {
     RDMAContext *rdma = incoming->rdma;
@@ -6808,7 +6884,7 @@ void postcopy_rdma_incoming_cleanup(RDMAPostcopyIncoming *incoming)
     DPRINTF("%s:%d mr cleanup\n", __func__, __LINE__);
     for (i = 0; i < local_ram_blocks->nb_blocks; ++i) {
         RDMALocalBlock *local_block = &local_ram_blocks->block[i];
-        int chunk;
+        uint64_t chunk;
         if (!local_block->pmr) {
             continue;
         }
@@ -6905,77 +6981,6 @@ void postcopy_rdma_incoming_cleanup(RDMAPostcopyIncoming *incoming)
     g_free(incoming);
 }
 
-/*
- * return value
- * 1: This mr is already deregestered. It implies that this page is
- *    already received.
- * 0: success
- * -1: error
- */
-static int postcopy_rdma_incoming_reg_mr(
-    RDMAPostcopyIncoming *incoming, RDMALocalBlock *local_block,
-    int chunk, uint32_t *rkey)
-{
-    int ret = 0;
-
-    qemu_mutex_lock(&incoming->mutex);
-    if (test_bit(chunk, local_block->unregister_bitmap)) {
-        ret = 1;
-        goto out;
-    }
-    if (local_block->pmr == NULL) {
-        local_block->pmr = g_malloc0(local_block->nb_chunks *
-                                     sizeof(struct ibv_mr*));
-    }
-    if (local_block->pmr[chunk] == NULL) {
-        uint8_t *chunk_start = ram_chunk_start(local_block, chunk);
-        size_t size = MIN(RDMA_REG_CHUNK_SIZE, local_block->length);
-        local_block->pmr[chunk] = ibv_reg_mr(
-            incoming->pd, chunk_start,
-            size, (IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE));
-        if (local_block->pmr[chunk] == NULL) {
-            perror("Failed to register chunk!");
-            DPRINTF("%s:%d total registrations %d"
-                    " block_index %d chunk 0x%x addr %p"
-                    " size 0x%zx\n",
-                    __func__, __LINE__,
-                    incoming->rdma->total_registrations,
-                    local_block->index, chunk, chunk_start, size);
-            ret = -1;
-            goto out;
-        }
-        incoming->rdma->total_registrations++;
-        DDPRINTF("%s:%d block_index %d chunk %x"
-                 " start %p size 0x%zx rkey %"PRIx32" total %d\n",
-                 __func__, __LINE__,
-                 local_block->index, chunk, chunk_start, size,
-                 local_block->pmr[chunk]->rkey,
-                 incoming->rdma->total_registrations);
-    }
-    *rkey = local_block->pmr[chunk]->rkey;
-
-out:
-    qemu_mutex_unlock(&incoming->mutex);
-    return ret;
-}
-
-static void postcopy_rdma_incoming_dereg_mr(
-    RDMAPostcopyIncoming *incoming, RDMALocalBlock *local_block, int chunk)
-{
-    qemu_mutex_lock(&incoming->mutex);
-    assert(local_block->pmr[chunk] != NULL);
-    DDPRINTF("%s:%d block_index %d chunk %x rkey %"PRIx32" total %d\n",
-             __func__, __LINE__,
-             local_block->index, chunk, local_block->pmr[chunk]->rkey,
-             incoming->rdma->total_registrations);
-    assert(!test_bit(chunk, local_block->unregister_bitmap));
-    set_bit(chunk, local_block->unregister_bitmap);
-    ibv_dereg_mr(local_block->pmr[chunk]);
-    local_block->pmr[chunk] = NULL;
-    incoming->rdma->total_registrations--;
-    qemu_mutex_unlock(&incoming->mutex);
-}
-
 static int postcopy_rdma_incoming_send_eoc(RDMAPostcopyIncoming* incoming)
 {
     RDMAPostcopyData *data;
@@ -7002,7 +7007,7 @@ postcopy_rdma_incoming_send_rdma_request_one(RDMAPostcopyIncoming* incoming,
     RDMAControlHeader *head;
     RDMARequest *prev;
     RDMARequest *req;
-    int i;
+    uint32_t i;
     int ret;
 
     DDPRINTF("%s:%d\n", __func__, __LINE__);
@@ -7142,8 +7147,8 @@ static int postcopy_rdma_incoming_page_received_one(
     UMem *umem;
     uint64_t host_s;
     uint64_t host_e;
-    int host_bit_s;
-    int host_bit_e;
+    uint64_t host_bit_s;
+    uint64_t host_bit_e;
     ram_addr_t offset;
     uint64_t chunk_s;
     uint64_t chunk_e;
@@ -7205,9 +7210,9 @@ static int postcopy_rdma_incoming_page_received_one(
     chunk_s = ram_chunk_index(umem->shmem, (uint8_t*)host_s);
     chunk_e = ram_chunk_index(umem->shmem, (uint8_t*)host_e - 1);
     for (chunk = chunk_s; chunk <= chunk_e; chunk++) {
-        int bit_s = (chunk_s << RDMA_REG_CHUNK_SHIFT) >> TARGET_PAGE_BITS;
-        int bit_e = MIN(bit_s + (RDMA_REG_CHUNK_SIZE >> TARGET_PAGE_BITS),
-                        (umem_block->length >> TARGET_PAGE_BITS) + 1);
+        uint64_t bit_s = (chunk_s << RDMA_REG_CHUNK_SHIFT) >> TARGET_PAGE_BITS;
+        uint64_t bit_e = MIN(bit_s + (RDMA_REG_CHUNK_SIZE >> TARGET_PAGE_BITS),
+                             (umem_block->length >> TARGET_PAGE_BITS) + 1);
 
         if (local_block->pmr[chunk] == NULL) {
             continue;
@@ -7339,7 +7344,7 @@ static int postcopy_rdma_incoming_register_arequest(
     RDMAPostcopyIncoming *incoming, RDMAPostcopyData *data)
 {
     int ret;
-    int i;
+    uint32_t i;
     RDMALocalBlocks *local_ram_blocks = &incoming->rdma->local_ram_blocks;
     RDMAControlHeader *head = (RDMAControlHeader*)data->data;
     RDMAAsyncRegister *areg = (RDMAAsyncRegister *)(head + 1);
@@ -7411,7 +7416,7 @@ static int postcopy_rdma_incoming_compress(RDMAPostcopyIncoming *incoming,
     RDMALocalBlocks *local_ram_blocks = &incoming->rdma->local_ram_blocks;
     RDMAControlHeader *head = (RDMAControlHeader*)data->data;
     RDMACompress *comp = (RDMACompress*)(head + 1);
-    int i;
+    uint32_t i;
     int ret;
     RDMAPostcopyData *sdata;
     RDMAControlHeader *res_head;
@@ -7419,7 +7424,7 @@ static int postcopy_rdma_incoming_compress(RDMAPostcopyIncoming *incoming,
     for (i = 0; i < head->repeat; i++, comp++) {
         uint8_t *host;
         RDMALocalBlock *local_block;
-        int chunk;
+        uint64_t chunk;
 
         network_to_compress(comp);
         if (comp->block_idx >= local_ram_blocks->nb_blocks) {
