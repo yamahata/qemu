@@ -1880,6 +1880,43 @@ static void postcopy_incoming_umem_wait_fault_write_fd(void)
     select(nfds + 1, NULL, &writefds, NULL, NULL);
 }
 
+static void postcopy_incoming_umem_mark_pending_clean(
+    const UMemPages *page_cached)
+{
+    /* record it for postcopy_incoming_umem_pending_clean_loop() */
+    bool wakeup = false;
+    int i;
+
+    DPRINTF("EAGAIN\n");
+    qemu_mutex_lock(&umemd.pending_clean_mutex);
+    for (i = 0; i < umemd.page_cached->nr; ++i) {
+        /* Although this calculation is inefficient,
+         * this code path is rare case.
+         */
+        uint64_t pgoff = page_cached->pgoffs[i];
+        uint64_t addr = pgoff << umemd.host_page_shift;
+        UMemBlock *block;
+
+        QLIST_FOREACH(block, &umemd.blocks, next) {
+            if (block->offset <= addr &&
+                addr < block->offset + block->length) {
+                addr -= block->offset;
+                pgoff = addr >> umemd.host_page_shift;
+                if (!test_and_set_bit(pgoff, block->pending_clean_bitmap)) {
+                    block->nr_pending_clean++;
+                    umemd.nr_pending_clean++;
+                    wakeup = true;
+                }
+                break;
+            }
+        }
+    }
+    qemu_mutex_unlock(&umemd.pending_clean_mutex);
+    if (wakeup) {
+        qemu_cond_broadcast(&umemd.pending_clean_cond);
+    }
+}
+
 static int postcopy_incoming_umem_fault_request(const UMemPages *page_cached,
                                                 bool nonblock)
 {
@@ -1894,7 +1931,8 @@ static int postcopy_incoming_umem_fault_request(const UMemPages *page_cached,
             int error = -errno;
             if (error == -EAGAIN || error == -EWOULDBLOCK) {
                 if (nonblock) {
-                    return -EAGAIN;
+                    postcopy_incoming_umem_mark_pending_clean(page_cached);
+                    break;
                 }
                 postcopy_incoming_umem_wait_fault_write_fd();
                 continue;
@@ -1910,7 +1948,7 @@ static int postcopy_incoming_umem_fault_request(const UMemPages *page_cached,
 
 
 static int postcopy_incoming_umem_mark_cached(
-    UMem *umem, const UMemPages *page_cached, bool nonblock)
+    UMem *umem, const UMemPages *page_cached)
 {
     int error = umem_mark_page_cached(umem, page_cached);
     if (error) {
@@ -1918,7 +1956,7 @@ static int postcopy_incoming_umem_mark_cached(
         return error;
     }
 
-    return postcopy_incoming_umem_fault_request(page_cached, nonblock);
+    return postcopy_incoming_umem_fault_request(page_cached, true);
 }
 
 int postcopy_incoming_umem_ram_loaded(UMemBlock *block, ram_addr_t offset)
@@ -1951,43 +1989,11 @@ int postcopy_incoming_umem_ram_loaded(UMemBlock *block, ram_addr_t offset)
     }
 
     if (umemd.page_cached->nr > 0) {
-        int error = postcopy_incoming_umem_mark_cached(
-            block->umem, umemd.page_cached, true);
+        int error = postcopy_incoming_umem_mark_cached(block->umem,
+                                                       umemd.page_cached);
         if (error) {
-            if (error == -EAGAIN) {
-                /* record it for postcopy_incoming_umem_pending_clean_loop() */
-                bool wakeup = false;
-                DPRINTF("EAGAIN\n");
-                qemu_mutex_lock(&umemd.pending_clean_mutex);
-                for (i = 0; i < umemd.page_cached->nr; ++i) {
-                    /* Although this calculation is inefficient,
-                     * this code path is rare case.
-                     */
-                    uint64_t pgoff = umemd.page_cached->pgoffs[i];
-                    uint64_t addr = pgoff << umemd.host_page_shift;
-                    QLIST_FOREACH(block, &umemd.blocks, next) {
-                        if (block->offset <= addr &&
-                            addr < block->offset + block->length) {
-                            addr -= block->offset;
-                            pgoff = addr >> umemd.host_page_shift;
-                            if (!test_and_set_bit(
-                                    pgoff, block->pending_clean_bitmap)) {
-                                block->nr_pending_clean++;
-                                umemd.nr_pending_clean++;
-                                wakeup = true;
-                            }
-                            break;
-                        }
-                    }
-                }
-                if (wakeup) {
-                    qemu_cond_broadcast(&umemd.pending_clean_cond);
-                }
-                qemu_mutex_unlock(&umemd.pending_clean_mutex);
-            } else {
-                perror("postcopy_incoming_umem_ram_load() write pipe\n");
-                return error;
-            }
+            perror("postcopy_incoming_umem_ram_load() write pipe\n");
+            return error;
         }
     }
     return 0;
@@ -2225,7 +2231,7 @@ static void *postcopy_incoming_umemd_fault_clean_bitmap(void *args)
             }
             if (max_nr - page_cached->nr < needed) {
                 error = postcopy_incoming_umem_mark_cached(block->umem,
-                                                           page_cached, false);
+                                                           page_cached);
                 if (error) {
                     goto error_out;
                 }
@@ -2234,7 +2240,7 @@ static void *postcopy_incoming_umemd_fault_clean_bitmap(void *args)
         }
         if (page_cached->nr > 0) {
             error = postcopy_incoming_umem_mark_cached(block->umem,
-                                                       page_cached, false);
+                                                       page_cached);
             if (error) {
                 goto error_out;
             }
