@@ -3967,6 +3967,10 @@ static int postcopy_rdma_buffer_poll(RDMAPostcopyBuffer *buffer,
         *data = postcopy_rdma_buffer_get_data(buffer, wc.wr_id);
         break;
     case IBV_WC_RECV:
+        if (wc.byte_len == 0) {
+            *data = NULL;
+            return 0;
+        }
         if (wc.byte_len < sizeof(*head) ||
             wc.byte_len > RDMA_POSTCOPY_REQUEST_MAX_BUFFER) {
             DPRINTF("invalid byte_len %d head size %zd\n",
@@ -7492,7 +7496,7 @@ static int postcopy_rdma_incoming_compress(RDMAPostcopyIncoming *incoming,
 int postcopy_rdma_incoming_recv(RDMAPostcopyIncoming *incoming)
 {
     int ret;
-    RDMAPostcopyData *data = NULL;
+    RDMAPostcopyData *data;
     RDMAControlHeader *head;
 
     if (!incoming->rdma->connected) {
