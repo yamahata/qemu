@@ -1748,10 +1748,13 @@ static int postcopy_incoming_umem_send_page_req(UMemBlock *block)
         for (i = 0; i < umemd.page_request->nr; i++) {
             target_pgoff = umemd.page_request->pgoffs[i] >>
                 umemd.host_to_target_page_shift;
-            if (umemd.precopy_enabled &&
-                /* race with postcopy_incoming_umemd_read_clean_bitmap
-                   but it results in sending redundant page req */
-                test_bit(target_pgoff, block->clean_bitmap)) {
+            if ((umemd.precopy_enabled &&
+                 /* race with postcopy_incoming_umemd_read_clean_bitmap
+                    but it results in sending redundant page req */
+                 test_bit(target_pgoff, block->clean_bitmap)) ||
+                /* race with postcopy_incoming_umem_ram_loaded
+                   bit it results in avoiding duplicated mark_cached */
+                test_bit(target_pgoff, block->phys_received)) {
                 int j;
                 for (j = 0; j < umemd.nr_host_pages_per_target_page; j++) {
                     umemd.page_clean->pgoffs[umemd.page_clean->nr] =
@@ -1767,19 +1770,24 @@ static int postcopy_incoming_umem_send_page_req(UMemBlock *block)
     } else {
         for (i = 0; i < umemd.page_request->nr; i++) {
             int j;
-            bool marked_clean = false;
+            bool marked_clean = true;
             target_pgoff = umemd.page_request->pgoffs[i] <<
                 umemd.host_to_target_page_shift;
-            if (umemd.precopy_enabled) {
-                marked_clean = true;
-                /* race with postcopy_incoming_umemd_read_clean_bitmap
-                   but it results in sending redundant page req */
-                for (j = 0; j < umemd.nr_target_pages_per_host_page; j++) {
-                    if (!test_bit(target_pgoff + j, block->clean_bitmap)) {
-                        marked_clean = false;
-                        break;
-                    }
+            for (j = 0; j < umemd.nr_target_pages_per_host_page; j++) {
+                if (umemd.precopy_enabled &&
+                    /* race with postcopy_incoming_umemd_read_clean_bitmap
+                       but it results in sending redundant page req */
+                    test_bit(target_pgoff + j, block->clean_bitmap)) {
+                    continue;
                 }
+                /* race with postcopy_incoming_umem_ram_loaded
+                   bit it results in avoiding duplicate mark cached */
+                if (test_bit(target_pgoff + j, block->phys_received)) {
+                    continue;
+                }
+
+                marked_clean = false;
+                break;
             }
             if (marked_clean) {
                 umemd.page_clean->pgoffs[umemd.page_clean->nr] =
