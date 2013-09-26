@@ -4903,7 +4903,7 @@ static void postcopy_rdma_outgoing_rdma_done(RDMAPostcopyOutgoing *outgoing,
             TARGET_PAGE_BITS;
         bit_e = MIN(bit_s + (RDMA_REG_CHUNK_SIZE >> TARGET_PAGE_BITS),
                     ((local_block->offset + local_block->length) >>
-                     TARGET_PAGE_BITS) + 1);
+                     TARGET_PAGE_BITS));
 
         local_block->nb_rdma[chunk]--;
         if (local_block->nb_rdma[chunk] > 0) {
@@ -7218,7 +7218,7 @@ static int postcopy_rdma_incoming_page_received_one(
     for (chunk = chunk_s; chunk <= chunk_e; chunk++) {
         uint64_t bit_s = (chunk_s << RDMA_REG_CHUNK_SHIFT) >> TARGET_PAGE_BITS;
         uint64_t bit_e = MIN(bit_s + (RDMA_REG_CHUNK_SIZE >> TARGET_PAGE_BITS),
-                             (umem_block->length >> TARGET_PAGE_BITS) + 1);
+                             (umem_block->length >> TARGET_PAGE_BITS));
 
         if (local_block->pmr[chunk] == NULL) {
             continue;
