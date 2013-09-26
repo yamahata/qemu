@@ -3969,6 +3969,8 @@ static int postcopy_rdma_buffer_poll(RDMAPostcopyBuffer *buffer,
     case IBV_WC_RECV:
         if (wc.byte_len < sizeof(*head) ||
             wc.byte_len > RDMA_POSTCOPY_REQUEST_MAX_BUFFER) {
+            DPRINTF("invalid byte_len %d head size %zd\n",
+                    wc.byte_len, sizeof(*head));
             return -EINVAL;
         }
         *data = postcopy_rdma_buffer_get_data(buffer, wc.wr_id);
@@ -4064,7 +4066,6 @@ static int postcopy_rdma_buffer_get_wc(
         enum ibv_wc_opcode opcode;
         fd_set fds;
         int nfds;
-        int ret;
         struct ibv_cq *cq;
         void *cq_ctx;
 
@@ -7491,7 +7492,7 @@ static int postcopy_rdma_incoming_compress(RDMAPostcopyIncoming *incoming,
 int postcopy_rdma_incoming_recv(RDMAPostcopyIncoming *incoming)
 {
     int ret;
-    RDMAPostcopyData *data;
+    RDMAPostcopyData *data = NULL;
     RDMAControlHeader *head;
 
     if (!incoming->rdma->connected) {
