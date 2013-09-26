@@ -1344,7 +1344,7 @@ static int postcopy_incoming_create_umemd(QEMUFile *mig_read)
         QLIST_FOREACH(block, &umemd.blocks, next) {
             /* bitmap is sent in the array of uint64_t for pre+post,
              * so round it up to 64 */
-            int nbits = ROUND_UP((block->length >> TARGET_PAGE_BITS) + 1, 64);
+            int nbits = ROUND_UP(block->length >> TARGET_PAGE_BITS, 64);
             block->phys_requested = bitmap_new(nbits);
             block->phys_received = bitmap_new(nbits);
             if (umemd.precopy_enabled) {
@@ -1352,7 +1352,7 @@ static int postcopy_incoming_create_umemd(QEMUFile *mig_read)
             }
             block->nr_pending_clean = 0;
             block->pending_clean_bitmap =
-                bitmap_new((block->length >> umemd.host_page_shift) + 1);
+                bitmap_new(block->length >> umemd.host_page_shift);
         }
         qemu_file_set_thread(mig_read, true);
         if (is_rdma) {
@@ -2072,8 +2072,7 @@ static int postcopy_incoming_umemd_pending_clean_loop(void)
 
     DPRINTF("pending clean bitmap\n");
     QLIST_FOREACH(block, &umemd.blocks, next) {
-        const unsigned long nbits =
-            (block->length >> umemd.host_page_shift) + 1;
+        const unsigned long nbits = (block->length >> umemd.host_page_shift);
         unsigned long bit;
 
         if (block->nr_pending_clean == 0) {
@@ -2190,7 +2189,7 @@ static void *postcopy_incoming_umemd_fault_clean_bitmap(void *args)
 
     DPRINTF("faulting clean bitmap\n");
     QLIST_FOREACH(block, &umemd.blocks, next) {
-        const unsigned long nbits = (block->length >> TARGET_PAGE_BITS) + 1;
+        const unsigned long nbits = (block->length >> TARGET_PAGE_BITS);
         unsigned long bit;
         int error;
 
@@ -2281,11 +2280,11 @@ void postcopy_be64_to_bitmap(uint8_t *buffer, uint64_t length)
 void postcopy_incoming_umemd_read_clean_bitmap_done(UMemBlock *block)
 {
     bitmap_copy(block->phys_requested, block->phys_received,
-                (block->length >> TARGET_PAGE_BITS) + 1);
+                block->length >> TARGET_PAGE_BITS);
     /* race with postcopy_incoming_umem_send_page_req,
        but it only sends redundant page requests which will be discarded */
     bitmap_copy(block->clean_bitmap, block->phys_received,
-                (block->length >> TARGET_PAGE_BITS) + 1);
+                block->length >> TARGET_PAGE_BITS);
 }
 
 static int postcopy_incoming_umemd_read_clean_bitmap(
