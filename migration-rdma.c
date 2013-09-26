@@ -4135,11 +4135,9 @@ static void postcopy_rdma_buffer_drain(RDMAPostcopyBuffer *buffer)
 {
     while (true) {
         int ret;
-        uint64_t wr_id;
-        enum ibv_wc_opcode opcode;
-        RDMAPostcopyData *data;
+        struct ibv_wc wc;
 
-        ret = postcopy_rdma_buffer_poll(buffer, &wr_id, &opcode, &data);
+        ret = ibv_poll_cq(buffer->cq, 1, &wc);
         if (ret < 0) {
             DPRINTF("%s:%d ret %d\n", __func__, __LINE__, ret);
             break;
@@ -4147,6 +4145,13 @@ static void postcopy_rdma_buffer_drain(RDMAPostcopyBuffer *buffer)
         if (ret == 0) {
             break;
         }
+        if (wc.status == IBV_WC_SUCCESS || wc.status == IBV_WC_WR_FLUSH_ERR) {
+            continue;
+        }
+
+        DPRINTF("error wr_id 0x%"PRIx64" status %d %s vendor_err %"PRId32"\n",
+                wc.wr_id, wc.status, ibv_wc_status_str(wc.status),
+                wc.vendor_err);
     }
 }
 
