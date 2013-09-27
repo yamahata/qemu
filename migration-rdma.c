@@ -5425,20 +5425,21 @@ static int postcopy_rdma_outgoing_prefault_backward(
 
     diff = outgoing->ms->params.prefault_backward << TARGET_PAGE_BITS;
     offset_s = offset - MIN(offset, diff);
-    offset -= TARGET_PAGE_SIZE;
     postcopy_rdma_outgoing_save_init(&save);
-    for (; offset >= offset_s; offset -= TARGET_PAGE_SIZE) {
-        uint8_t *host_addr = local_block->local_host_addr + offset;
+    for (; offset > offset_s; offset -= TARGET_PAGE_SIZE) {
+        ram_addr_t offset_cur = offset - TARGET_PAGE_SIZE;
+        uint8_t *host_addr = local_block->local_host_addr + offset_cur;
         uint64_t chunk = ram_chunk_index(local_block->local_host_addr,
                                          host_addr);
         uint32_t lkey;
         uint32_t rkey = local_block->remote_keys[chunk];
+        assert(offset >= TARGET_PAGE_SIZE);
 
         if (rkey == 0) {
             break;
         }
         if (!migration_bitmap_test_and_reset_dirty(local_block->ram_block->mr,
-                                                   offset)) {
+                                                   offset_cur)) {
             continue;
         }
         ret = qemu_rdma_register_and_get_keys(
@@ -5464,7 +5465,8 @@ static int postcopy_rdma_outgoing_prefault_backward(
             }
         }
         if (save.sge.length == 0) {
-            uint64_t remote_host_addr = local_block->remote_host_addr + offset;
+            uint64_t remote_host_addr =
+                local_block->remote_host_addr + offset_cur;
             postcopy_rdma_outgoing_save_first_page(outgoing, &save,
                                                    local_block,
                                                    (uint64_t)host_addr,
