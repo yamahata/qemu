@@ -3967,10 +3967,6 @@ static int postcopy_rdma_buffer_poll(RDMAPostcopyBuffer *buffer,
         *data = postcopy_rdma_buffer_get_data(buffer, wc.wr_id);
         break;
     case IBV_WC_RECV:
-        if (wc.byte_len == 0) {
-            *data = NULL;
-            return 0;
-        }
         if (wc.byte_len < sizeof(*head) ||
             wc.byte_len > RDMA_POSTCOPY_REQUEST_MAX_BUFFER) {
             DPRINTF("invalid byte_len %d head size %zd\n",
@@ -4160,50 +4156,23 @@ static void postcopy_rdma_buffer_drain(RDMAPostcopyBuffer *buffer)
     }
 }
 
-#define RDMA_POSTCOPY_EMPTY_WRID        (~0ULL)
 static void postcopy_rdma_buffer_cq_empty(RDMAPostcopyBuffer *buffer)
 {
-    int ret;
-    struct ibv_send_wr wr = {
-        .wr_id = RDMA_POSTCOPY_EMPTY_WRID,
-        .opcode = IBV_WR_SEND,
-        .send_flags = IBV_SEND_SIGNALED,
-        .sg_list = NULL,
-        .num_sge = 0,
-    };
-    struct ibv_send_wr *bad_wr;
-
-    postcopy_rdma_buffer_drain(buffer);
-    ret = ibv_req_notify_cq(buffer->cq, 0);
-    if (ret) {
-        DPRINTF("%s:%d ret %d\n", __func__, __LINE__, ret);
-        return;
-    }
-
-    ret = ibv_post_send(buffer->qp, &wr, &bad_wr);
-    if (ret) {
-        DPRINTF("%s:%d ret %d\n", __func__, __LINE__, ret);
-        return;
-    }
-
-    while (true) {
+    while(buffer->inuse > 0) {
+        int ret;
         struct ibv_cq *cq;
         void *cq_ctx;
 
-        ret = ibv_get_cq_event(buffer->channel, &cq, &cq_ctx);
-        if (ret) {
-            DPRINTF("%s:%d ret %d\n", __func__, __LINE__, ret);
-            return;
-        }
         ret = ibv_req_notify_cq(buffer->cq, 0);
         if (ret) {
             DPRINTF("%s:%d ret %d\n", __func__, __LINE__, ret);
             return;
         }
-        ibv_ack_cq_events(buffer->cq, 1);
 
         while (true) {
             struct ibv_wc wc;
+            RDMAPostcopyData *data;
+
             ret = ibv_poll_cq(buffer->cq, 1, &wc);
             if (ret < 0) {
                 DPRINTF("%s:%d ret %d\n", __func__, __LINE__, ret);
@@ -4214,10 +4183,19 @@ static void postcopy_rdma_buffer_cq_empty(RDMAPostcopyBuffer *buffer)
             }
             assert(ret == 1);
 
-            if (wc.wr_id == RDMA_POSTCOPY_EMPTY_WRID) {
-                return;
-            }
+            data = postcopy_rdma_buffer_get_data(buffer, wc.wr_id);
+            postcopy_rdma_buffer_free(buffer, data);
         }
+
+        if (buffer->inuse == 0) {
+            break;
+        }
+        ret = ibv_get_cq_event(buffer->channel, &cq, &cq_ctx);
+        if (ret) {
+            DPRINTF("%s:%d ret %d\n", __func__, __LINE__, ret);
+            return;
+        }
+        ibv_ack_cq_events(buffer->cq, 1);
     }
 }
 
