@@ -6827,6 +6827,8 @@ static int postcopy_rdma_incoming_reg_mr(
 
     qemu_mutex_lock(&incoming->mutex);
     if (test_bit(chunk, local_block->unregister_bitmap)) {
+        DDPRINTF("%s:%d block_index %d chunk %"PRIx64"\n",
+                 __func__, __LINE__, local_block->index, chunk);
         ret = 1;
         goto out;
     }
@@ -7047,6 +7049,8 @@ postcopy_rdma_incoming_send_rdma_request_one(RDMAPostcopyIncoming* incoming,
             return ret;
         }
         if (ret > 0) {
+            DPRINTF("%s:%d pgoffs %"PRIx64"\n",
+                    __func__, __LINE__, umem_req->pgoffs[i]);
             continue;
         }
         set_bit(chunk, local_block->transit_bitmap);
