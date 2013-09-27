@@ -7230,7 +7230,7 @@ static int postcopy_rdma_incoming_page_received_one(
         uint64_t bit_e = MIN(bit_s + (RDMA_REG_CHUNK_SIZE >> TARGET_PAGE_BITS),
                              (umem_block->length >> TARGET_PAGE_BITS));
 
-        if (local_block->pmr[chunk] == NULL) {
+        if (local_block->pmr == NULL || local_block->pmr[chunk] == NULL) {
             continue;
         }
         if (host_bit_s <= bit_s && bit_e <= host_bit_e) {
