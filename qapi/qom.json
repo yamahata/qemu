@@ -922,6 +922,8 @@
 #     TD guest cannot get TD quoting for attestation if QGS is not
 #     provided.  So admin should always provide it.
 #
+# @debug: Whether it's a debug TD or not (default: 0)
+#
 # Since: 9.0
 ##
 { 'struct': 'TdxGuestProperties',
@@ -929,7 +931,8 @@
             '*mrconfigid': 'str',
             '*mrowner': 'str',
             '*mrownerconfig': 'str',
-            '*quote-generation-socket': 'SocketAddress' } }
+            '*quote-generation-socket': 'SocketAddress',
+            '*debug': 'bool' } }
 
 ##
 # @ThreadContextProperties:
