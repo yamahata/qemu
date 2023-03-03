@@ -74,5 +74,6 @@ void tdx_apply_xfam_dependencies(CPUState *cpu);
 void tdx_check_minus_features(CPUState *cpu);
 bool tdx_debug_enabled(void);
 hwaddr tdx_remove_stolen_bit(hwaddr gpa);
+bool host_tsx_broken(void);
 
 #endif /* QEMU_I386_TDX_H */
