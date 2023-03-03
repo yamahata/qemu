@@ -236,7 +236,7 @@ static KvmTdxCpuidLookup tdx_cpuid_lookup[FEATURE_WORDS] = {
     },
     [FEAT_1_ECX] = {
         .tdx_fixed0 =
-            CPUID_EXT_MONITOR | CPUID_EXT_VMX | CPUID_EXT_SMX |
+            CPUID_EXT_VMX | CPUID_EXT_SMX |
             BIT(16),
         .tdx_fixed1 =
             CPUID_EXT_CX16 | CPUID_EXT_PDCM | CPUID_EXT_X2APIC |
@@ -442,6 +442,12 @@ void tdx_get_supported_cpuid(uint32_t function, uint32_t index, int reg,
      * report the support.
      */
     *ret &= ~(~vmm_cap & tdx_cpuid_lookup[w].vmm_fixup);
+
+    if (function == 7 && index == 0 && reg == R_EBX && host_tsx_broken())
+        *ret &= ~(CPUID_7_0_EBX_RTM | CPUID_7_0_EBX_HLE);
+
+    if (function == 1 && reg == R_ECX && !enable_cpu_pm)
+        *ret &= ~CPUID_EXT_MONITOR;
 }
 
 void tdx_apply_xfam_dependencies(CPUState *cpu)
