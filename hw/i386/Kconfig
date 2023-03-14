@@ -13,6 +13,7 @@ config SGX
 config TDX
     bool
     select X86_FW_OVMF
+    select MINI_SOCK
     depends on KVM
 
 config PC

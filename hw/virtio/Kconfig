@@ -90,3 +90,6 @@ config VHOST_VDPA_DEV
     bool
     default y
     depends on VIRTIO && VHOST_VDPA && LINUX
+
+config MINI_SOCK
+    bool

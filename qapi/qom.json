@@ -730,6 +730,42 @@
   'data': {} }
 
 ##
+# @MiniSockProperties:
+#
+# Properties for mini-sock objects.
+#
+# @endpoints: string for endpoints
+#             the format is "<endpoint0>;<endpoint1>;..."
+#             The delimitor of each endpoint is ';' semicolon.
+#             The format of endpoint is
+#             <type>:<cid>:<port>:<address for server>
+#             type = "server" | "client"
+#             cid = uint32 integer in string
+#             port = uint64 integer in string
+#             address = string for socket address for server.
+#             example "unix:/run/minisock/server/quoting".
+#             example
+#             "server:3:42:unix:/run/minisock/server/quoting;client:4:43:/run/minisock/server/vtpm"
+#
+# @guest-cid: context id of minisock as client
+#
+# @mmio: mmio base address
+#
+# @path: string for base directory of unix socket address as client.
+#        example "/run/minisock/client"
+#
+# @mtu: mtu
+#
+# Since: 7.3
+##
+{ 'struct': 'MiniSockProperties',
+  'data': { 'endpoints': 'str',
+            'guest-cid': 'uint64',
+            '*mmio': 'uint64',
+            '*path': 'str',
+            '*mtu': 'uint64' } }
+
+##
 # @PrManagerHelperProperties:
 #
 # Properties for pr-manager-helper objects.
@@ -958,6 +994,7 @@
     { 'name': 'memory-backend-memfd-private',
       'if': 'CONFIG_LINUX' },
     'memory-backend-ram',
+    'mini-sock',
     'pef-guest',
     { 'name': 'pr-manager-helper',
       'if': 'CONFIG_LINUX' },
@@ -1030,6 +1067,7 @@
       'memory-backend-memfd-private':       { 'type': 'MemoryBackendPrivateMemfdProperties',
                                       'if': 'CONFIG_LINUX' },
       'memory-backend-ram':         'MemoryBackendProperties',
+      'mini-sock':                  'MiniSockProperties',
       'pr-manager-helper':          { 'type': 'PrManagerHelperProperties',
                                       'if': 'CONFIG_LINUX' },
       'qtest':                      'QtestProperties',
