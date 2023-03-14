@@ -151,3 +151,18 @@ virtio_pmem_flush_done(int type) "fsync return=%d"
 virtio_gpio_start(void) "start"
 virtio_gpio_stop(void) "stop"
 virtio_gpio_set_status(uint8_t status) "0x%x"
+
+# mini-sock.c
+mini_sock_mmio_write(uint64_t offset, uint64_t value, unsigned int size) "offset=0x%"PRIx64" value=0x%"PRIx64" size=%u"
+mini_sock_mmio_read(uint64_t offset, unsigned int size) "offset=0x%"PRIx64" size=%u"
+mini_sock_op(uint64_t gpa, uint64_t src_cid, uint64_t dst_cid, uint32_t src_port, uint32_t dst_port, uint32_t len, uint16_t type, uint16_t op, uint32_t flags) "gpa=0x%"PRIx64" src_cid=0x%"PRIx64" dst_cid=0x%"PRIx64" src_port=0x%"PRIx32" dst_port=0x%"PRIx32" len=0x%"PRIx32" type=0x%"PRIx16" op=0x%"PRIx16" flags=0x%"PRIx16
+mini_sock_op_end(uint32_t ret, uint32_t state) "ret 0x%"PRIx32" state 0x%"PRIx32
+mini_sock_socket_un(const char *path) "unix=\"%s\""
+mini_sock_socket_close(const char *path) "unix=\"%s\""
+mini_sock_handle_request(uint64_t src_cid, uint64_t dst_cid, uint32_t src_port, uint32_t dst_port) "src_cid 0x%"PRIx64" dst_cid 0x%"PRIx64" src_port 0x%"PRIx32" dst_port 0x%"PRIx32
+mini_sock_fd_read(ssize_t len, const char *path, uint64_t src_cid, uint64_t dst_cid, uint32_t src_port, uint32_t dst_port) "len 0x%zx path \"%s\" src_cid 0x%"PRIx64" dst_cid 0x%"PRIx64" src_port 0x%"PRIx32" dst_port 0x%"PRIx32
+mini_sock_fd_write(uint64_t gpa, uint32_t len, uint64_t src_cid, uint64_t dst_cid, uint32_t src_port, uint32_t dst_port, const char *path) "pga 0x%"PRIx64" len 0x%"PRIx32" src_cid 0x%"PRIx64" dst_cid 0x%"PRIx64" src_port 0x%"PRIx32" dst_port 0x%"PRIx32" dst \"%s\""
+mini_sock_client_conn(uint64_t server_cid, uint64_t client_cid, uint32_t server_port, uint32_t client_port, uint64_t pid, const char *path) "server cid 0x%"PRIx64" client cid 0x%"PRIx64" server port 0x%"PRIx32" client port 0x%"PRIx32" pid 0x%"PRIx64" path \"%s\""
+mini_sock_client_conn_close(uint64_t server_cid, uint64_t client_cid, uint32_t server_port, uint32_t client_port, uint64_t pid, const char *path) "server cid 0x%"PRIx64" client cid 0x%"PRIx64" server port 0x%"PRIx32" client port 0x%"PRIx32" pid 0x%"PRIx64" path \"%s\""
+mini_sock_handle_response(uint64_t src_cid, uint64_t dst_cid, uint32_t scr_port, uint32_t dst_port) "src_cid 0x%"PRIx64" dst_cid 0x%"PRIx64" src_port 0x%"PRIx32" dst_port 0x%"PRIx32
+mini_sock_socket_accept(int fd, int ret, int errno_, const char *path) "fd %d ret %d errno %d path \"%s\""
