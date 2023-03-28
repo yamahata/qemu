@@ -1279,7 +1279,9 @@ int tdx_pre_create_vcpu(CPUState *cpu)
     memcpy(init_vm.init_vm.mrowner, tdx_guest->mrowner, sizeof(init_vm.init_vm.mrowner));
     memcpy(init_vm.init_vm.mrownerconfig, tdx_guest->mrownerconfig, sizeof(init_vm.init_vm.mrownerconfig));
 
-    r = tdx_vm_ioctl(KVM_TDX_INIT_VM, 0, &init_vm);
+    do {
+        r = tdx_vm_ioctl(KVM_TDX_INIT_VM, 0, &init_vm);
+    } while (r == -EAGAIN);
     if (r < 0) {
         /* try old struct kvm_tdx_init_vm. */
         memset(&init_vm, 0, sizeof(init_vm));
