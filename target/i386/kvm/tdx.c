@@ -626,6 +626,7 @@ static void get_tdx_capabilities(void)
     /* 1st generation of TDX reports 6 cpuid configs */
     int nr_cpuid_configs = 6;
     int r, size;
+    bool use_platform_ioctl = false;
 
     do {
         size = sizeof(struct kvm_tdx_capabilities) +
@@ -633,8 +634,17 @@ static void get_tdx_capabilities(void)
         caps = g_malloc0(size);
         caps->nr_cpuid_configs = nr_cpuid_configs;
 
-        r = tdx_platform_ioctl(KVM_TDX_CAPABILITIES, 0, caps);
-        if (r == -EINVAL ) {
+        if (!use_platform_ioctl) {
+            r = tdx_vm_ioctl(KVM_TDX_CAPABILITIES, 0, caps);
+            if (r == -EINVAL) {
+                /* Fallback for compatibility. */
+                use_platform_ioctl = false;
+            }
+        }
+        if (use_platform_ioctl) {
+            r = tdx_platform_ioctl(KVM_TDX_CAPABILITIES, 0, caps);
+        }
+        if (r == -EINVAL) {
             g_free(caps);
             break;
         }
