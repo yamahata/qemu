@@ -398,7 +398,6 @@ int kvm_arch_release_virq_post(int virq);
 int kvm_arch_msi_data_to_gsi(uint32_t data);
 
 int kvm_set_irq(KVMState *s, int irq, int level);
-int kvm_irqchip_send_msi(KVMState *s, MSIMessage msg);
 
 void kvm_irqchip_add_irq_route(KVMState *s, int gsi, int irqchip, int pin);
 
@@ -481,6 +480,7 @@ void kvm_cpu_synchronize_state(CPUState *cpu);
 
 void kvm_init_cpu_signals(CPUState *cpu);
 
+int kvm_irqchip_send_msi(KVMState *s, MSIMessage msg);
 /**
  * kvm_irqchip_add_msi_route - Add MSI route for specific vector
  * @c:      KVMRouteChange instance.
