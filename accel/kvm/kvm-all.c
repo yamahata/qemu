@@ -1438,6 +1438,17 @@ static void kvm_set_phys_mem(KVMMemoryListener *kml,
                     strerror(-err));
             abort();
         }
+
+        /* If TDX VM, make the default region private. */
+        if (memory_region_is_default_private(mr)) {
+            err = kvm_encrypt_reg_region(start_addr, slot_size, true);
+            if (err) {
+                fprintf(stderr, "%s: error converting slot to private: %s\n",
+                        __func__, strerror(-err));
+                abort();
+            }
+        }
+
         start_addr += slot_size;
         ram_start_offset += slot_size;
         ram += slot_size;
