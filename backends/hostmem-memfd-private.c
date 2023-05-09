@@ -65,11 +65,11 @@ priv_memfd_backend_memory_alloc(HostMemoryBackend *backend, Error **errp)
         }
     }
     priv_fd = qemu_memfd_restricted(backend->size, flags, mount_fd, errp);
-    if (priv_fd == -1) {
-        return;
-    }
     if (mount_fd >= 0) {
         close(mount_fd);
+    }
+    if (priv_fd == -1) {
+        return;
     }
 
     name = host_memory_backend_get_name(backend);
