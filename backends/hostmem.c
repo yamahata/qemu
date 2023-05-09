@@ -174,8 +174,8 @@ static void host_memory_backend_set_merge(Object *obj, bool value, Error **errp)
     }
 
     if (value != backend->merge) {
-        void *ptr = memory_region_get_ram_ptr(&backend->mr);
-        uint64_t sz = memory_region_size(&backend->mr);
+        void *ptr = memory_region_get_ram_ptr(backend->mr);
+        uint64_t sz = memory_region_size(backend->mr);
 
         qemu_madvise(ptr, sz,
                      value ? QEMU_MADV_MERGEABLE : QEMU_MADV_UNMERGEABLE);
@@ -200,8 +200,8 @@ static void host_memory_backend_set_dump(Object *obj, bool value, Error **errp)
     }
 
     if (value != backend->dump) {
-        void *ptr = memory_region_get_ram_ptr(&backend->mr);
-        uint64_t sz = memory_region_size(&backend->mr);
+        void *ptr = memory_region_get_ram_ptr(backend->mr);
+        uint64_t sz = memory_region_size(backend->mr);
 
         qemu_madvise(ptr, sz,
                      value ? QEMU_MADV_DODUMP : QEMU_MADV_DONTDUMP);
@@ -233,9 +233,9 @@ static void host_memory_backend_set_prealloc(Object *obj, bool value,
     }
 
     if (value && !backend->prealloc) {
-        int fd = memory_region_get_fd(&backend->mr);
-        void *ptr = memory_region_get_ram_ptr(&backend->mr);
-        uint64_t sz = memory_region_size(&backend->mr);
+        int fd = memory_region_get_fd(backend->mr);
+        void *ptr = memory_region_get_ram_ptr(backend->mr);
+        uint64_t sz = memory_region_size(backend->mr);
 
         qemu_prealloc_mem(fd, ptr, sz, backend->prealloc_threads,
                           backend->prealloc_context, &local_err);
@@ -276,6 +276,8 @@ static void host_memory_backend_init(Object *obj)
     HostMemoryBackend *backend = MEMORY_BACKEND(obj);
     MachineState *machine = MACHINE(qdev_get_machine());
 
+    backend->mr = &backend->base_mr;
+
     /* TODO: convert access to globals to compat properties */
     backend->merge = machine_mem_merge(machine);
     backend->dump = machine_dump_guest_core(machine);
@@ -294,12 +296,12 @@ bool host_memory_backend_mr_inited(HostMemoryBackend *backend)
      * NOTE: We forbid zero-length memory backend, so here zero means
      * "we haven't inited the backend memory region yet".
      */
-    return memory_region_size(&backend->mr) != 0;
+    return memory_region_size(backend->mr) != 0;
 }
 
 MemoryRegion *host_memory_backend_get_memory(HostMemoryBackend *backend)
 {
-    return host_memory_backend_mr_inited(backend) ? &backend->mr : NULL;
+    return host_memory_backend_mr_inited(backend) ? backend->mr : NULL;
 }
 
 void host_memory_backend_set_mapped(HostMemoryBackend *backend, bool mapped)
@@ -314,7 +316,7 @@ bool host_memory_backend_is_mapped(HostMemoryBackend *backend)
 
 size_t host_memory_backend_pagesize(HostMemoryBackend *memdev)
 {
-    size_t pagesize = qemu_ram_pagesize(memdev->mr.ram_block);
+    size_t pagesize = qemu_ram_pagesize(memdev->mr->ram_block);
     g_assert(pagesize >= qemu_real_host_page_size());
     return pagesize;
 }
@@ -334,8 +336,8 @@ host_memory_backend_memory_complete(UserCreatable *uc, Error **errp)
             goto out;
         }
 
-        ptr = memory_region_get_ram_ptr(&backend->mr);
-        sz = memory_region_size(&backend->mr);
+        ptr = memory_region_get_ram_ptr(backend->mr);
+        sz = memory_region_size(backend->mr);
 
         if (backend->merge) {
             qemu_madvise(ptr, sz, QEMU_MADV_MERGEABLE);
@@ -399,7 +401,7 @@ host_memory_backend_memory_complete(UserCreatable *uc, Error **errp)
          * specified NUMA policy in place.
          */
         if (backend->prealloc) {
-            qemu_prealloc_mem(memory_region_get_fd(&backend->mr), ptr, sz,
+            qemu_prealloc_mem(memory_region_get_fd(backend->mr), ptr, sz,
                               backend->prealloc_threads,
                               backend->prealloc_context, &local_err);
             if (local_err) {
