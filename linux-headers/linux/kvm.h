@@ -102,8 +102,14 @@ struct kvm_userspace_memory_region2 {
 	__u64 guest_phys_addr;
 	__u64 memory_size;
 	__u64 userspace_addr;
-	__u64 restricted_offset;
-	__u32 restricted_fd;
+	union {
+		__u64 restricted_offset; /* FIXME: delete this */
+		__u64 gmem_offset;
+	};
+	union {
+		__u32 restricted_fd; /* FIXME: delete this */
+		__u32 gmem_fd;
+	};
 	__u32 pad1;
 	__u64 pad2[14];
 };
@@ -2334,5 +2340,15 @@ struct kvm_memory_attributes {
 };
 
 #define KVM_MEMORY_ATTRIBUTE_PRIVATE           (1ULL << 3)
+
+#define KVM_CREATE_GUEST_MEMFD  _IOWR(KVMIO,  0xd4, struct kvm_create_guest_memfd)
+
+#define KVM_GUEST_MEMFD_HUGE_PMD		(1ULL << 0)
+
+struct kvm_create_guest_memfd {
+	__u64 size;
+	__u64 flags;
+	__u64 reserved[6];
+};
 
 #endif /* __LINUX_KVM_H */
