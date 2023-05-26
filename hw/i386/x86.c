@@ -1157,7 +1157,7 @@ void x86_bios_rom_init(MachineState *ms, const char *default_firmware,
 
     bios = g_malloc(sizeof(*bios));
     if (is_tdx_vm()) {
-        memory_region_init_ram_restricted(bios, NULL, "pc.bios", bios_size, &error_fatal);
+        memory_region_init_ram_gmem(bios, NULL, "pc.bios", bios_size, &error_fatal);
         tdx_set_tdvf_region(bios);
     } else {
         memory_region_init_ram(bios, NULL, "pc.bios", bios_size, &error_fatal);

@@ -295,8 +295,8 @@ static int kvm_set_user_memory_region(KVMMemoryListener *kml, KVMSlot *slot, boo
     mem.guest_phys_addr = slot->start_addr;
     mem.userspace_addr = (unsigned long)slot->ram;
     mem.flags = slot->flags;
-    mem.restricted_fd = slot->fd;
-    mem.restricted_offset = slot->ofs;
+    mem.gmem_fd = slot->fd;
+    mem.gmem_offset = slot->ofs;
 
     if (slot->memory_size && !new && (slot->flags ^ slot->old_flags) & KVM_MEM_READONLY) {
         /* Set the slot size to 0 before setting the slot to the desired
@@ -313,16 +313,16 @@ static int kvm_set_user_memory_region(KVMMemoryListener *kml, KVMSlot *slot, boo
 err:
     trace_kvm_set_user_memory(mem.slot >> 16, (uint16_t)mem.slot, mem.flags,
                               mem.guest_phys_addr, mem.memory_size,
-                              mem.userspace_addr, mem.restricted_fd,
-			      mem.restricted_offset, ret);
+                              mem.userspace_addr, mem.gmem_fd,
+			      mem.gmem_offset, ret);
     if (ret < 0) {
         error_report("%s: KVM_SET_USER_MEMORY_REGION2 failed, slot=%d,"
                      " start=0x%" PRIx64 ", size=0x%" PRIx64 ","
                      " flags=0x%" PRIx32 ","
-                     " restricted_fd=%" PRId32 ", restricted_offset=0x%" PRIx64 ": %s",
+                     " gmem_fd=%" PRId32 ", gmem_offset=0x%" PRIx64 ": %s",
                      __func__, mem.slot, slot->start_addr,
 		     (uint64_t)mem.memory_size, mem.flags,
-                     mem.restricted_fd, (uint64_t)mem.restricted_offset,
+                     mem.gmem_fd, (uint64_t)mem.gmem_offset,
                      strerror(errno));
     }
     return ret;
@@ -496,7 +496,7 @@ static int kvm_mem_flags(MemoryRegion *mr)
     if (readonly && kvm_readonly_mem_allowed) {
         flags |= KVM_MEM_READONLY;
     }
-    if (mr->ram_block && mr->ram_block->restricted_fd > 0) {
+    if (mr->ram_block && mr->ram_block->gmem_fd > 0) {
         flags |= KVM_MEM_PRIVATE;
     }
     return flags;
@@ -1428,7 +1428,7 @@ static void kvm_set_phys_mem(KVMMemoryListener *kml,
         mem->ram_start_offset = ram_start_offset;
         mem->ram = ram;
         mem->flags = kvm_mem_flags(mr);
-        mem->fd = mr->ram_block->restricted_fd;
+        mem->fd = mr->ram_block->gmem_fd;
         mem->ofs = (uint8_t*)ram - mr->ram_block->host;
 
         kvm_slot_init_dirty_bitmap(mem);

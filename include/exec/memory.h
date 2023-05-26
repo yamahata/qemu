@@ -1371,14 +1371,14 @@ void memory_region_init_ram_from_fd(MemoryRegion *mr,
                                     Error **errp);
 
 /**
- * memory_region_set_restricted_fd:  Set RAM memory region with a restricted fd.
+ * memory_region_set_gmem_fd:  Set RAM memory region with a gmem fd.
  *
  * @mr: the #MemoryRegion to be set.
- * @fd: the fd to provide restricted memory.
+ * @fd: the fd to provide gmem memory.
  *
  */
 
-void memory_region_set_restricted_fd(MemoryRegion *mr, int fd);
+void memory_region_set_gmem_fd(MemoryRegion *mr, int fd);
 
 #endif
 
@@ -1556,11 +1556,11 @@ void memory_region_init_ram(MemoryRegion *mr,
                             uint64_t size,
                             Error **errp);
 
-void memory_region_init_ram_restricted(MemoryRegion *mr,
-                                       Object *owner,
-                                       const char *name,
-                                       uint64_t size,
-                                       Error **errp);
+void memory_region_init_ram_gmem(MemoryRegion *mr,
+                                 Object *owner,
+                                 const char *name,
+                                 uint64_t size,
+                                 Error **errp);
 
 /**
  * memory_region_init_rom: Initialize a ROM memory region.
@@ -1683,9 +1683,9 @@ bool memory_region_is_protected(MemoryRegion *mr);
 
 /**
  * memory_region_can_be_private: check whether a memory region has
- * restricted memfd
+ * gmem memfd
  *
- * Returns %true if a memory region's ram_block has restricted_fd assigned.
+ * Returns %true if a memory region's ram_block has gmem_fd assigned.
  *
  * @mr: the memory region being queried
  */

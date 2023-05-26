@@ -102,14 +102,8 @@ struct kvm_userspace_memory_region2 {
 	__u64 guest_phys_addr;
 	__u64 memory_size;
 	__u64 userspace_addr;
-	union {
-		__u64 restricted_offset; /* FIXME: delete this */
-		__u64 gmem_offset;
-	};
-	union {
-		__u32 restricted_fd; /* FIXME: delete this */
-		__u32 gmem_fd;
-	};
+	__u64 gmem_offset;
+	__u32 gmem_fd;
 	__u32 pad1;
 	__u64 pad2[14];
 };

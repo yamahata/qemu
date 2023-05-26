@@ -1915,7 +1915,7 @@ RAMBlock *qemu_ram_alloc_from_fd(ram_addr_t size, MemoryRegion *mr,
     new_block->used_length = size;
     new_block->max_length = size;
     new_block->flags = ram_flags;
-    new_block->restricted_fd = -1;
+    new_block->gmem_fd = -1;
     new_block->host = file_ram_alloc(new_block, size, fd, readonly,
                                      !file_size, offset, errp);
     if (!new_block->host) {
@@ -1986,7 +1986,7 @@ RAMBlock *qemu_ram_alloc_internal(ram_addr_t size, ram_addr_t max_size,
     new_block->max_length = max_size;
     assert(max_size >= size);
     new_block->fd = -1;
-    new_block->restricted_fd = -1;
+    new_block->gmem_fd = -1;
     new_block->page_size = qemu_real_host_page_size();
     new_block->host = host;
     new_block->flags = ram_flags;
@@ -3703,7 +3703,7 @@ int ram_block_convert_range(RAMBlock *rb, uint64_t start, size_t length,
 {
     int fd;
 
-    if (!rb || rb->restricted_fd < 0) {
+    if (!rb || rb->gmem_fd < 0) {
         return -1;
     }
 
@@ -3719,7 +3719,7 @@ int ram_block_convert_range(RAMBlock *rb, uint64_t start, size_t length,
     if (shared_to_private) {
         fd = rb->fd;
     } else {
-        fd = rb->restricted_fd;
+        fd = rb->gmem_fd;
     }
 
     return ram_block_discard_range_fd(rb, start, length, fd);

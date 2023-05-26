@@ -1664,11 +1664,11 @@ void memory_region_init_ram_from_fd(MemoryRegion *mr,
     }
 }
 
-void memory_region_set_restricted_fd(MemoryRegion *mr, int fd)
+void memory_region_set_gmem_fd(MemoryRegion *mr, int fd)
 {
     if (mr->ram_block) {
         assert(fd >= 0);
-        mr->ram_block->restricted_fd = fd;
+        mr->ram_block->gmem_fd = fd;
     }
 }
 
@@ -1859,7 +1859,7 @@ bool memory_region_is_protected(MemoryRegion *mr)
 
 bool memory_region_can_be_private(MemoryRegion *mr)
 {
-    return mr->ram_block && mr->ram_block->restricted_fd >= 0;
+    return mr->ram_block && mr->ram_block->gmem_fd >= 0;
 }
 
 uint8_t memory_region_get_dirty_log_mask(MemoryRegion *mr)
@@ -3591,7 +3591,7 @@ void memory_region_init_ram(MemoryRegion *mr,
     vmstate_register_ram(mr, owner_dev);
 }
 
-void memory_region_init_ram_restricted(MemoryRegion *mr,
+void memory_region_init_ram_gmem(MemoryRegion *mr,
                                        Object *owner,
                                        const char *name,
                                        uint64_t size,
@@ -3609,11 +3609,11 @@ void memory_region_init_ram_restricted(MemoryRegion *mr,
 
     priv_fd = qemu_memfd_restricted(size, 0, errp);
     if (priv_fd == -1) {
-        error_report("Failed to allocate restricted memfd");
+        error_report("Failed to allocate gmem memfd");
         return;
     }
 
-    memory_region_set_restricted_fd(mr, priv_fd);
+    memory_region_set_gmem_fd(mr, priv_fd);
 
     /* This will assert if owner is neither NULL nor a DeviceState.
      * We only want the owner here for the purposes of defining a
