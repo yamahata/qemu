@@ -1194,7 +1194,7 @@ static void tdx_guest_region_add(MemoryListener *listener,
 
     if (owner && object_dynamic_cast(owner, TYPE_MEMORY_BACKEND) &&
         object_property_get_bool(owner, "private", NULL) &&
-        mr->ram_block && mr->ram_block->gmem_fd <= 0) {
+        mr->ram_block && mr->ram_block->gmem_fd < 0) {
         struct kvm_create_guest_memfd gmem = {
             .size = memory_region_size(mr),
             /* TODO: add property to hostmem backend for huge pmd */

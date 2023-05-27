@@ -1877,7 +1877,7 @@ bool memory_region_is_protected(MemoryRegion *mr)
 
 bool memory_region_can_be_private(MemoryRegion *mr)
 {
-    return mr->ram_block && mr->ram_block->gmem_fd > 0;
+    return mr->ram_block && mr->ram_block->gmem_fd >= 0;
 }
 
 bool memory_region_is_default_private(MemoryRegion *mr)

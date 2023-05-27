@@ -522,7 +522,7 @@ static int kvm_mem_flags(MemoryRegion *mr)
     if (readonly && kvm_readonly_mem_allowed) {
         flags |= KVM_MEM_READONLY;
     }
-    if (mr->ram_block && mr->ram_block->gmem_fd > 0) {
+    if (mr->ram_block && mr->ram_block->gmem_fd >= 0) {
         flags |= KVM_MEM_PRIVATE;
     }
     return flags;
