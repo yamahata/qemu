@@ -1667,6 +1667,7 @@ void memory_region_init_ram_from_fd(MemoryRegion *mr,
 void memory_region_set_restricted_fd(MemoryRegion *mr, int fd)
 {
     if (mr->ram_block) {
+        assert(fd >= 0);
         mr->ram_block->restricted_fd = fd;
     }
 }
@@ -1858,7 +1859,7 @@ bool memory_region_is_protected(MemoryRegion *mr)
 
 bool memory_region_can_be_private(MemoryRegion *mr)
 {
-    return mr->ram_block && mr->ram_block->restricted_fd > 0;
+    return mr->ram_block && mr->ram_block->restricted_fd >= 0;
 }
 
 uint8_t memory_region_get_dirty_log_mask(MemoryRegion *mr)
