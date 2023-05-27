@@ -3620,10 +3620,24 @@ void memory_region_init_ram_gmem(MemoryRegion *mr,
         return;
     }
 
-    priv_fd = qemu_memfd_restricted(size, 0, errp);
-    if (priv_fd == -1) {
-        error_report("Failed to allocate gmem memfd");
-        return;
+    if (object_dynamic_cast(OBJECT(current_accel()), TYPE_KVM_ACCEL)) {
+        KVMState *s = KVM_STATE(current_accel());
+        struct kvm_create_guest_memfd gmem = {
+            .size = size,
+            /* TODO: add property to hostmem backend for huge pmd */
+            .flags = KVM_GUEST_MEMFD_HUGE_PMD,
+        };
+
+        priv_fd = kvm_vm_ioctl(s, KVM_CREATE_GUEST_MEMFD, &gmem);
+        if (priv_fd < 0) {
+            fprintf(stderr, "%s: error creating gmem: %s\n", __func__,
+                    strerror(-priv_fd));
+            abort();
+        }
+    } else {
+        fprintf(stderr, "%s: gmem unsupported accel: %s\n", __func__,
+                current_accel_name());
+        abort();
     }
 
     memory_region_set_gmem_fd(mr, priv_fd);
