@@ -1649,6 +1649,8 @@ static void tdx_getquote_task_cleanup(struct tdx_get_quote_task *t, bool outlen_
         t->hdr.out_len = cpu_to_le32(0);
     }
 
+    /* Publish the response contents before marking this request completed. */
+    smp_wmb();
     if (address_space_write(
             &address_space_memory, t->gpa,
             MEMTXATTRS_UNSPECIFIED, &t->hdr, sizeof(t->hdr)) != MEMTX_OK) {
