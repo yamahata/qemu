@@ -559,7 +559,7 @@ struct kvm_pmu_event_filter {
 
 #define KVM_X86_DEFAULT_VM     0
 #define KVM_X86_PROTECTED_VM   1
-#define KVM_X86_TDX_VM		1
+#define KVM_X86_TDX_VM		2
 
 /* Trust Domain eXtension sub-ioctl() commands. */
 enum kvm_tdx_cmd_id {
@@ -607,9 +607,13 @@ struct kvm_tdx_capabilities {
 	__u64 attrs_fixed1;
 	__u64 xfam_fixed0;
 	__u64 xfam_fixed1;
+#define TDX_CAP_GPAW_48	(1 << 0)
+#define TDX_CAP_GPAW_52	(1 << 1)
+	__u32 supported_gpaw;
+	__u32 padding;
+	__u64 reserved[251];
 
 	__u32 nr_cpuid_configs;
-	__u32 padding;
 	struct kvm_tdx_cpuid_config cpuid_configs[0];
 };
 
