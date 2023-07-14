@@ -158,6 +158,7 @@ static int kvm_get_one_msr(X86CPU *cpu, int index, uint64_t *value);
 
 static const char* vm_type_name[] = {
     [KVM_X86_DEFAULT_VM] = "X86_DEFAULT_VM",
+    [KVM_X86_PROTECTED_VM] = "X86_PROTECTED_VM",
     [KVM_X86_TDX_VM] = "X86_TDX_VM",
 };
 
