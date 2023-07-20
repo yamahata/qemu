@@ -3643,7 +3643,7 @@ void memory_region_init_ram_gmem(MemoryRegion *mr,
         struct kvm_create_guest_memfd gmem = {
             .size = size,
             /* TODO: add property to hostmem backend for huge pmd */
-            .flags = KVM_GUEST_MEMFD_HUGE_PMD,
+            .flags = KVM_GUEST_MEMFD_ALLOW_HUGEPAGE,
         };
 
         priv_fd = kvm_vm_ioctl(s, KVM_CREATE_GUEST_MEMFD, &gmem);

@@ -1366,7 +1366,7 @@ static void tdx_guest_region_add(MemoryListener *listener,
         struct kvm_create_guest_memfd gmem = {
             .size = memory_region_size(mr),
             /* TODO: add property to hostmem backend for huge pmd */
-            .flags = KVM_GUEST_MEMFD_HUGE_PMD,
+            .flags = KVM_GUEST_MEMFD_ALLOW_HUGEPAGE,
         };
         int fd;
 

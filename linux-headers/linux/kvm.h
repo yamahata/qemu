@@ -2385,7 +2385,7 @@ struct kvm_memory_attributes {
 
 #define KVM_CREATE_GUEST_MEMFD  _IOWR(KVMIO,  0xd4, struct kvm_create_guest_memfd)
 
-#define KVM_GUEST_MEMFD_HUGE_PMD		(1ULL << 0)
+#define KVM_GUEST_MEMFD_ALLOW_HUGEPAGE		(1ULL << 0)
 
 struct kvm_create_guest_memfd {
 	__u64 size;
