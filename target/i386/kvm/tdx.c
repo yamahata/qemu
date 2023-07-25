@@ -1542,6 +1542,15 @@ static void tdx_handle_map_gpa(X86CPU *cpu, struct kvm_tdx_vmcall *vmcall)
         vmcall->status_code = TDG_VP_VMCALL_ALIGN_ERROR;
         return;
     }
+    /* Overflow case. */
+    if (gpa + size < gpa) {
+        return;
+    }
+    if (gpa >= (1ULL << cpu->phys_bits) / 2||
+        gpa + size >= (1ULL << cpu->phys_bits) / 2 ||
+        size >= (1ULL << cpu->phys_bits) / 2) {
+        return;
+    }
 
     if (size > TDX_MAP_GPA_MAX_LEN) {
         retry = true;
