@@ -589,8 +589,6 @@ struct kvm_tdx_cmd {
 	 * Defined for consistency with struct kvm_sev_cmd.
 	 */
 	__u64 error;
-	/* Reserved: Defined for consistency with struct kvm_sev_cmd. */
-	__u64 unused;
 };
 
 struct kvm_tdx_cpuid_config {

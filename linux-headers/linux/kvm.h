@@ -253,7 +253,6 @@ struct kvm_tdx_exit {
 			 */
 #define TDX_VMCALL_REG_MASK_RBX	BIT_ULL(2)
 #define TDX_VMCALL_REG_MASK_RDX	BIT_ULL(3)
-#define TDX_VMCALL_REG_MASK_RBP	BIT_ULL(5)
 #define TDX_VMCALL_REG_MASK_RSI	BIT_ULL(6)
 #define TDX_VMCALL_REG_MASK_RDI	BIT_ULL(7)
 #define TDX_VMCALL_REG_MASK_R8	BIT_ULL(8)
@@ -297,7 +296,6 @@ struct kvm_tdx_exit {
 			__u64 in_r8;
 			__u64 in_r9;
 			__u64 in_rdx;
-			__u64 in_rbp;
 
 			/* Output parameters: VMM -> guest */
 			union {
@@ -320,7 +318,6 @@ struct kvm_tdx_exit {
 			__u64 out_r8;
 			__u64 out_r9;
 			__u64 out_rdx;
-			__u64 out_rbp;
 		} vmcall;
 	} u;
 };
