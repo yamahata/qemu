@@ -1358,8 +1358,8 @@ static void tdx_guest_region_add(MemoryListener *listener,
 static MemoryListener tdx_memory_listener = {
     .name = TYPE_TDX_GUEST,
     .region_add = tdx_guest_region_add,
-    /* Higher than KVM memory listener = 10. */
-    .priority = 20,
+    /* Higher than KVM memory listener. */
+    .priority = MEMORY_LISTENER_PRIORITY_ACCEL_HIGH,
 };
 
 /* tdx guest */
