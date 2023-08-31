@@ -3273,6 +3273,7 @@ static int kvm_buf_set_msrs(X86CPU *cpu)
 static void kvm_init_msrs(X86CPU *cpu)
 {
     CPUX86State *env = &cpu->env;
+    int ret;
 
     kvm_msr_buf_reset(cpu);
 
@@ -3303,7 +3304,8 @@ static void kvm_init_msrs(X86CPU *cpu)
     if (has_msr_ucode_rev) {
         kvm_msr_entry_add(cpu, MSR_IA32_UCODE_REV, cpu->ucode_rev);
     }
-    assert(kvm_buf_set_msrs(cpu) == 0);
+    ret = kvm_buf_set_msrs(cpu);
+    assert(ret == 0);
 }
 
 static int kvm_put_msrs(X86CPU *cpu, int level)
