@@ -233,6 +233,9 @@ static inline uint32_t tdx_cap_cpuid_config(uint32_t function,
                 break;
             case R_EDX:
                 ret = cpuid_c->edx;
+                if (cpuid_c->leaf == 1 && cpuid_c->sub_leaf == 0xffffffff) {
+                    ret &= ~CPUID_HT;
+                }
                 break;
             default:
                 return 0;
@@ -275,6 +278,7 @@ void tdx_get_supported_cpuid(uint32_t function, uint32_t index, int reg,
      */
     uint32_t vmm_cap = *ret;
     FeatureWord w;
+    uint32_t tmp;
 
     /* Only handle features leaves that recognized by feature_word_info[] */
     w = get_cpuid_featureword_index(function, index, reg);
@@ -297,7 +301,11 @@ void tdx_get_supported_cpuid(uint32_t function, uint32_t index, int reg,
      * bits of "fixed0" type while present natively. It's safe because
      * the unsupported bits will be masked off by .fixed0 later.
      */
-    *ret |= host_cpuid_reg(function, index, reg);
+    tmp = host_cpuid_reg(function, index, reg);
+    if (function == 1 && reg == R_EDX) {
+        tmp &= ~CPUID_HT;
+    }
+    *ret |= tmp;
 
     /* Adjust according to "fixed" type in tdx_cpuid_lookup. */
     *ret |= tdx_cpuid_lookup[w].tdx_fixed1;
