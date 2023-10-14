@@ -621,6 +621,19 @@ static void tdx_post_init_vcpus(void)
     }
 }
 
+static void tdx_release_vm(void)
+{
+    int r;
+
+    do {
+        r = tdx_vm_ioctl(KVM_TDX_RELEASE_VM, 0, NULL);
+    } while (r == -EAGAIN || r == -EINTR);
+    /*
+     * Don't handle EBUSY as vcpu thread may still be running.  As this is
+     * in the context of atexit(), silently ignore the error.
+     */
+}
+
 static void tdx_finalize_vm(Notifier *notifier, void *unused)
 {
     TdxFirmware *tdvf = &tdx_guest->tdvf;
@@ -706,6 +719,8 @@ static void tdx_finalize_vm(Notifier *notifier, void *unused)
         exit(0);
     }
     tdx_guest->parent_obj.ready = true;
+
+    atexit(tdx_release_vm);
 }
 
 static Notifier tdx_machine_done_notify = {
