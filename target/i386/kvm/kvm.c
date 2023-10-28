@@ -2078,7 +2078,11 @@ int kvm_arch_init_vcpu(CPUState *cs)
         }
     }
 
-    env->apic_bus_freq = KVM_APIC_BUS_FREQUENCY;
+    if (is_tdx_vm()) {
+        env->apic_bus_freq = TDX_APIC_BUS_FREQUENCY;
+    } else {
+        env->apic_bus_freq = KVM_APIC_BUS_FREQUENCY;
+    }
 
     /*
      * kvm_hyperv_expand_features() is called here for the second time in case
