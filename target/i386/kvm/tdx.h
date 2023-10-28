@@ -14,6 +14,9 @@
 #define TYPE_TDX_GUEST "tdx-guest"
 #define TDX_GUEST(obj)  OBJECT_CHECK(TdxGuest, (obj), TYPE_TDX_GUEST)
 
+/* TDX requires bus frequency 25MHz */
+#define TDX_APIC_BUS_FREQUENCY 25000000ULL
+
 typedef struct TdxGuestClass {
     ConfidentialGuestSupportClass parent_class;
 } TdxGuestClass;
