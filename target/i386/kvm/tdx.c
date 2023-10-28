@@ -721,6 +721,9 @@ int tdx_kvm_init(MachineState *ms, Error **errp)
 
     x86ms->eoi_intercept_unsupported = true;
 
+    if (!kvm_check_extension(kvm_state, KVM_CAP_X86_BUS_FREQUENCY_CONTROL))
+        return -EOPNOTSUPP;
+
     if (!tdx_caps) {
         r = get_tdx_capabilities(errp);
         if (r) {
@@ -845,6 +848,14 @@ int tdx_pre_create_vcpu(CPUState *cpu, Error **errp)
     if ((env->tsc_khz * 1000) % TDX_APIC_BUS_FREQUENCY) {
         error_setg(errp, "Invalid TSC %ld KHz, it must be multiple of 25MHz",
                    env->tsc_khz);
+        goto out;
+    }
+
+    r = kvm_vm_enable_cap(kvm_state, KVM_CAP_X86_BUS_FREQUENCY_CONTROL,
+                          0, TDX_APIC_BUS_FREQUENCY);
+    if (r < 0) {
+        error_setg_errno(errp, -r,
+                         "Unable to set core crystal clock frequency to 25MHz");
         goto out;
     }
 
