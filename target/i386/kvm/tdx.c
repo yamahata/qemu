@@ -737,6 +737,9 @@ static int tdx_kvm_init(ConfidentialGuestSupport *cgs, Error **errp)
 
     x86ms->eoi_intercept_unsupported = true;
 
+    if (!kvm_check_extension(kvm_state, KVM_CAP_X86_BUS_FREQUENCY_CONTROL))
+        return -EOPNOTSUPP;
+
     if (!tdx_caps) {
         r = get_tdx_capabilities(errp);
         if (r) {
@@ -860,6 +863,14 @@ int tdx_pre_create_vcpu(CPUState *cpu, Error **errp)
         error_setg(errp, "Invalid TSC %ld KHz, it must be multiple of 25MHz",
                    env->tsc_khz);
         return -EINVAL;
+    }
+
+    r = kvm_vm_enable_cap(kvm_state, KVM_CAP_X86_BUS_FREQUENCY_CONTROL,
+                          0, TDX_APIC_BUS_FREQUENCY);
+    if (r < 0) {
+        error_setg_errno(errp, -r,
+                         "Unable to set core crystal clock frequency to 25MHz");
+        return r;
     }
 
     /* it's safe even env->tsc_khz is 0. KVM uses host's tsc_khz in this case */
