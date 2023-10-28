@@ -842,7 +842,7 @@ int tdx_pre_create_vcpu(CPUState *cpu, Error **errp)
         goto out;
     }
 
-    if (env->tsc_khz % (25 * 1000)) {
+    if ((env->tsc_khz * 1000) % TDX_APIC_BUS_FREQUENCY) {
         error_setg(errp, "Invalid TSC %ld KHz, it must be multiple of 25MHz",
                    env->tsc_khz);
         goto out;
