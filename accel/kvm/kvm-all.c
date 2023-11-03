@@ -2630,9 +2630,12 @@ static int kvm_init(MachineState *ms)
 
     kvm_guest_memfd_supported = kvm_check_extension(s, KVM_CAP_GUEST_MEMFD);
 
-    if (kvm_check_extension(s, KVM_CAP_MEMORY_ATTRIBUTES)) {
-        kvm_supported_memory_attributes = kvm_ioctl(s, KVM_GET_SUPPORTED_MEMORY_ATTRIBUTES, 0);
+    ret = kvm_vm_check_extension(s, KVM_CAP_MEMORY_ATTRIBUTES);
+    if (ret < 0) {
+        warn_report("KVM_CHECK_EXTENSION(KVM_CAP_MEMORY_ATTRIBUTES) failed %s",
+                    strerror(-ret));
     }
+    kvm_supported_memory_attributes = ret;
 
     if (object_property_find(OBJECT(current_machine), "kvm-type")) {
         g_autofree char *kvm_type = object_property_get_str(OBJECT(current_machine),
