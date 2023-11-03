@@ -1314,10 +1314,10 @@ struct kvm_ppc_resize_hpt {
 #define KVM_CAP_COUNTER_OFFSET 227
 #define KVM_CAP_ARM_EAGER_SPLIT_CHUNK_SIZE 228
 #define KVM_CAP_ARM_SUPPORTED_BLOCK_SIZES 229
-#define KVM_CAP_X86_BUS_FREQUENCY_CONTROL 230
 
 /* TODO: remove this workaround to avoid CAP number conflict in the upstream. */
 #define KVM_CAP_MEMORY_ATTRIBUTES 500
+#define KVM_CAP_X86_BUS_FREQUENCY_CONTROL 400
 #define KVM_CAP_USER_MEMORY2 750
 #define KVM_CAP_MEMORY_FAULT_INFO 800
 #define KVM_CAP_GUEST_MEMFD 900
