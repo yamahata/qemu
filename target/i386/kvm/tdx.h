@@ -56,6 +56,9 @@ typedef struct TdxGuest {
     /* GetQuote */
     int quote_generation_num;
     SocketAddress *quote_generation;
+
+    /* Shutdown */
+    Notifier shutdown_notifier;
 } TdxGuest;
 
 #ifdef CONFIG_TDX
