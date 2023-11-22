@@ -367,10 +367,10 @@ static inline int tdx_vm_ioctl(int cmd_id, __u32 flags, void *data)
     return tdx_ioctl_internal(NULL, TDX_VM_IOCTL, cmd_id, flags, data);
 }
 
-static inline int tdx_vcpu_ioctl(void *vcpu_fd, int cmd_id, __u32 flags,
+static inline int tdx_vcpu_ioctl(CPUState *cpu, int cmd_id, __u32 flags,
                                  void *data)
 {
-    return  tdx_ioctl_internal(vcpu_fd, TDX_VCPU_IOCTL, cmd_id, flags, data);
+    return  tdx_ioctl_internal(cpu, TDX_VCPU_IOCTL, cmd_id, flags, data);
 }
 
 static int get_tdx_capabilities(Error **errp)
