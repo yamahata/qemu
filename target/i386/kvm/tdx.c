@@ -621,6 +621,55 @@ static void tdx_post_init_vcpus(void)
     }
 }
 
+static void tdx_shutdown_vcpu(CPUState *cpu, run_on_cpu_data unused)
+{
+    int r;
+
+    if (!runstate_check(RUN_STATE_SHUTDOWN)) {
+        return;
+    }
+
+    r = tdx_vcpu_ioctl(cpu, KVM_TDX_RELEASE_VM, 0, NULL);
+    /* EBUSY: The main thread hasn't issued VM ioctl KVM_TDX_RELEASE_VM yet. */
+    if (r == -EBUSY || r == -EAGAIN || r == -EINTR) {
+        /* Try again. */
+        async_run_on_cpu(cpu, tdx_shutdown_vcpu, unused);
+        r = 0;
+    }
+    if (r) {
+        warn_report("KVM_TDX_RELEASE_VM failed %s", strerror(-r));
+    }
+}
+
+static void tdx_shutdown_notifier(Notifier *n, void *opaque)
+{
+    CPUState *cpu;
+    int r;
+
+    do {
+        r = tdx_vm_ioctl(KVM_TDX_RELEASE_VM, 0, NULL);
+        /*
+         * EBUSY: The vcpu thread may still be running, busy wait for vcpu
+         * thread to exit.
+         * EAGAIN: KVM notifies that it started to release VM, but we don't loop
+         * to complete it here.  We will notify vcpu threads to issue vcpu
+         * KVM_TDX_RELEASE_VM in parallel.
+         */
+    } while (r == -EBUSY || r == -EINTR);
+
+    if (r && r != -EAGAIN) {
+        warn_report("VVM KVM_TDX_RELEASE_VM failed %s", strerror(-r));
+    }
+
+    CPU_FOREACH(cpu) {
+        run_on_cpu_data unused = {
+            .host_ptr = NULL,
+        };
+
+        async_run_on_cpu(cpu, tdx_shutdown_vcpu, unused);
+    }
+}
+
 static void tdx_release_vm(void)
 {
     int r;
@@ -720,6 +769,8 @@ static void tdx_finalize_vm(Notifier *notifier, void *unused)
     }
     tdx_guest->parent_obj.ready = true;
 
+    tdx_guest->shutdown_notifier.notify = tdx_shutdown_notifier;
+    qemu_register_shutdown_notifier(&tdx_guest->shutdown_notifier);
     atexit(tdx_release_vm);
 }
 
