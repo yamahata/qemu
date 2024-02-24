@@ -1241,6 +1241,7 @@ struct kvm_ppc_resize_hpt {
 #define KVM_CAP_GUEST_MEMFD 234
 #define KVM_CAP_VM_TYPES 235
 #define KVM_CAP_MEMORY_MAPPING 236
+#define KVM_CAP_PROTECTED 1100
 
 /* TODO: remove this workaround to avoid CAP number conflict in the upstream. */
 #define KVM_CAP_X86_BUS_FREQUENCY_CONTROL 400
@@ -2323,6 +2324,66 @@ struct kvm_memory_mapping {
 	__u64 nr_pages;
 	__u64 flags;
 	__u64 source;
+};
+
+/* KVM_CAP_PROTECTED */
+#define KVM_UPDATE_PROTECTED   _IOWR(KVMIO, 0xd5, struct kvm_update_protected)
+
+enum kvm_update_protected_cmd {
+       /*
+	* Vendor specific
+	* SEV: KVM_SEV_LAUNCH_MEASURE,
+	*      KVM_SEV_LAUNCH_SECRET
+	* TDX: N/A
+	*/
+       KVM_UPDATE_VENDOR,
+       /*
+	* for VM, and VCPU:
+	* VM: KVM_SEV_LAUNCH_START,
+	*     KVM_TDX_INIT_VM,
+	* VCPU: KVM_SEV_LAUNCH_UPDATE_VMSA,
+	*	KVM_TDX_INIT_VCPU
+	*/
+       KVM_UPDATE_INIT,
+       /*
+	* for VM:
+	* VM: flags = 0 [|MEASURE]
+	*     KVM_SEV_LAUNCH_UPDATE_DATA
+	*     KVM_TDX_INIT_MEM_REGION
+	*/
+       KVM_UPDATE_MEMORY,
+       /*
+	* for VM:
+	* VM: KVM_SE_LAUNCH_FINISH
+	*     KVM_TDX_FINALIZE_VM
+	*/
+       KVM_UPDATE_FINALIZE,
+};
+
+/* KVM_UPDATE_PROTECTED_MEMORY for guest_memfd */
+#define KVM_PROTECTED_UPDATE_MEASURE   BIT_ULL(0)
+
+struct kvm_update_protected_memory {
+       __u64 uaddr;
+       __u64 gpa;
+       __u64 size;
+       __u64 flags;
+       __u64 vendor;   /* vendor specific data */
+};
+
+struct kvm_update_protected {
+       __u64 cmd;
+       __u64 flags;    /* must be 0 for now. */
+       __u64 error;
+       __u64 data;
+};
+
+/* SEV */
+struct kvm_sev_update_init_vm
+{
+       __u32 sev_fd;
+       __u32 pad;
+       struct kvm_sev_launch_start start;
 };
 
 #endif /* __LINUX_KVM_H */
