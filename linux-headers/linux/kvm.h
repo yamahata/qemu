@@ -1244,7 +1244,7 @@ struct kvm_ppc_resize_hpt {
 
 /* TODO: remove this workaround to avoid CAP number conflict in the upstream. */
 #define KVM_CAP_X86_BUS_FREQUENCY_CONTROL 400
-#define KVM_CAP_MEMORY_MAPPING 550
+#define KVM_CAP_MAP_MEMORY 550
 
 #ifdef KVM_CAP_IRQ_ROUTING
 
@@ -2317,13 +2317,12 @@ struct kvm_create_guest_memfd {
 	__u64 reserved[6];
 };
 
-#define KVM_MEMORY_MAPPING	_IOWR(KVMIO, 0xd5, struct kvm_memory_mapping)
+#define KVM_MAP_MEMORY  _IOWR(KVMIO, 0xd5, struct kvm_memory_mapping)
 
 struct kvm_memory_mapping {
-	__u64 base_gfn;
-	__u64 nr_pages;
-	__u64 flags;
-	__u64 source;
+        __u64 base_address;
+        __u64 size;
+        __u64 flags;
 };
 
 #endif /* __LINUX_KVM_H */

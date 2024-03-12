@@ -655,35 +655,42 @@ static void tdx_finalize_vm(Notifier *notifier, void *unused)
 
     tdx_post_init_vcpus();
 
+    if (!kvm_check_extension(kvm_state, KVM_CAP_MAP_MEMORY)) {
+        error_report("KVM_CAP_MAP_MEMORY is not supported.");
+        exit(1);
+    }
     for_each_tdx_fw_entry(tdvf, entry) {
         struct kvm_memory_mapping mapping = {
-            .base_gfn = entry->address >> 12,
-            .nr_pages = entry->size >> 12,
-            .source = (__u64)entry->mem_ptr,
+            .base_address = entry->address,
+            .size = entry->size,
+            .flags = 0,
         };
+        struct kvm_tdx_init_mem_region region;
+        uint64_t flags;
 
         do {
-            r = kvm_vcpu_ioctl(first_cpu, KVM_MEMORY_MAPPING, &mapping);
-        } while (r == -EAGAIN);
+            r = kvm_vcpu_ioctl(first_cpu, KVM_MAP_MEMORY, &mapping);
+        } while (r == -EAGAIN || r == -EINTR);
 
         if (r < 0) {
              error_report("KVM_MEMORY_MAPPING failed %s", strerror(-r));
              exit(1);
         }
 
-        if (entry->attributes & TDVF_SECTION_ATTRIBUTES_MR_EXTEND) {
-            mapping = (struct kvm_memory_mapping) {
-                .base_gfn = entry->address >> 12,
-                .nr_pages = entry->size >> 12,
-            };
+        flags = (entry->attributes & TDVF_SECTION_ATTRIBUTES_MR_EXTEND) ?
+            KVM_TDX_MEASURE_MEMORY_REGION : 0;
+        region = (struct kvm_tdx_init_mem_region) {
+            .source_addr = (__u64)entry->mem_ptr,
+            .gpa = entry->address,
+            .nr_pages = entry->size >> 12,
+        };
 
-            do {
-                r = tdx_vm_ioctl(KVM_TDX_EXTEND_MEMORY, 0, &mapping);
-            } while (r == -EAGAIN);
-            if (r < 0) {
-                error_report("KVM_TDX_EXTEND_MEMORY failed %s", strerror(-r));
-                exit(1);
-            }
+        do {
+            r = tdx_vcpu_ioctl(first_cpu, KVM_TDX_INIT_MEM_REGION, flags, &region);
+        } while (r == -EAGAIN || r == -EINTR);
+        if (r < 0) {
+            error_report("KVM_TDX_EXTEND_MEMORY failed %s", strerror(-r));
+            exit(1);
         }
 
         if (entry->type == TDVF_SECTION_TYPE_TD_HOB ||
