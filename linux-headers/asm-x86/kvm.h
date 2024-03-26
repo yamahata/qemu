@@ -562,15 +562,16 @@ struct kvm_pmu_event_filter {
 
 #define KVM_X86_DEFAULT_VM	0
 #define KVM_X86_SW_PROTECTED_VM	1
-#define KVM_X86_TDX_VM		2
-#define KVM_X86_SNP_VM		3
+#define KVM_X86_SEV_VM		2
+#define KVM_X86_SEV_ES_VM	3
+#define KVM_X86_TDX_VM		4
 
 /* Trust Domain eXtension sub-ioctl() commands. */
 enum kvm_tdx_cmd_id {
 	KVM_TDX_CAPABILITIES = 0,
 	KVM_TDX_INIT_VM,
 	KVM_TDX_INIT_VCPU,
-	KVM_TDX_EXTEND_MEMORY,
+	KVM_TDX_INIT_MEM_REGION,
 	KVM_TDX_FINALIZE_VM,
 
 	KVM_TDX_CMD_NR_MAX,
@@ -647,6 +648,14 @@ struct kvm_tdx_init_vm {
 	 * module doesn't virtualize.
 	 */
 	struct kvm_cpuid2 cpuid;
+};
+
+#define KVM_TDX_MEASURE_MEMORY_REGION   _BITULL(0)
+
+struct kvm_tdx_init_mem_region {
+	__u64 source_addr;
+	__u64 gpa;
+	__u64 nr_pages;
 };
 
 #endif /* _ASM_X86_KVM_H */
